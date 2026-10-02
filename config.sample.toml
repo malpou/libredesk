@@ -66,6 +66,12 @@ bucket_path = ""
 # S3 signed URL expiry duration (e.g., "30m", "1h")
 expiry = "30m"
 
+# OIDC client credentials from config/env (e.g. LIBREDESK_OIDC__CLIENT_ID and LIBREDESK_OIDC__CLIENT_SECRET).
+# When both are set, the SSO provider with this client ID uses this secret instead of the one saved in Admin -> Security -> SSO.
+# [oidc]
+# client_id = ""
+# client_secret = ""
+
 # Postgres.
 [db]
 # If running locally, use `localhost`.

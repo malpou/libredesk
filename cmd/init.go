@@ -41,6 +41,7 @@ import (
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
 	emailnotifier "github.com/abhinavxd/libredesk/internal/notification/providers/email"
 	"github.com/abhinavxd/libredesk/internal/oidc"
+	oidcmodels "github.com/abhinavxd/libredesk/internal/oidc/models"
 	"github.com/abhinavxd/libredesk/internal/ratelimit"
 	"github.com/abhinavxd/libredesk/internal/report"
 	"github.com/abhinavxd/libredesk/internal/role"
@@ -875,11 +876,21 @@ func buildProviders(o *oidc.Manager) ([]auth_.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	return toAuthProviders(oidcConfigs, ko.String("oidc.client_id"), ko.String("oidc.client_secret")), nil
+}
 
-	providers := make([]auth_.Provider, 0, len(oidcConfigs))
-	for _, config := range oidcConfigs {
+// toAuthProviders turns enabled OIDC configs into auth providers. When both
+// secretClientID and secret are set, the provider whose client ID matches
+// secretClientID uses secret instead of the stored client secret.
+func toAuthProviders(configs []oidcmodels.OIDC, secretClientID, secret string) []auth_.Provider {
+	providers := make([]auth_.Provider, 0, len(configs))
+	for _, config := range configs {
 		if !config.Enabled {
 			continue
+		}
+		clientSecret := config.ClientSecret
+		if secretClientID != "" && secret != "" && config.ClientID == secretClientID {
+			clientSecret = secret
 		}
 		providers = append(providers, auth_.Provider{
 			ID:           config.ID,
@@ -887,10 +898,10 @@ func buildProviders(o *oidc.Manager) ([]auth_.Provider, error) {
 			ProviderURL:  config.ProviderURL,
 			RedirectURL:  config.RedirectURI,
 			ClientID:     config.ClientID,
-			ClientSecret: config.ClientSecret,
+			ClientSecret: clientSecret,
 		})
 	}
-	return providers, nil
+	return providers
 }
 
 // initOIDC initializes open id connect config manager.
