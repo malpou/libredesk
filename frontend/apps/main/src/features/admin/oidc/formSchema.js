@@ -1,6 +1,6 @@
 import * as z from 'zod'
 
-export const createFormSchema = (t) => z.object({
+export const createFormSchema = (t, { credentialsFromEnv = false } = {}) => z.object({
   disabled: z.boolean().optional(),
   name: z
     .string({
@@ -21,11 +21,14 @@ export const createFormSchema = (t) => z.object({
       required_error: t('globals.messages.required'),
     })
     .min(1, { message: t('globals.messages.required') }),
-  client_secret: z
-    .string({
-      required_error: t('globals.messages.required'),
-    })
-    .min(1, { message: t('globals.messages.required') }),
+  // A secret supplied through the environment is not required in the form.
+  client_secret: credentialsFromEnv
+    ? z.string().optional()
+    : z
+      .string({
+        required_error: t('globals.messages.required'),
+      })
+      .min(1, { message: t('globals.messages.required') }),
   redirect_uri: z.string().readonly().optional(),
   enabled: z.boolean().optional().default(true),
 })
