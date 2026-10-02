@@ -528,6 +528,8 @@
   "admin.sla.resolutionTime": "Resolution time",
   "admin.sla.triggerTiming": "Trigger timing",
   "admin.sla.warning": "Warning",
+  "admin.sso.credentialsManagedByEnv": "Client ID and client secret of this provider are managed by environment variables and cannot be changed here.",
+  "admin.sso.credentialsManagedByEnvNote": "Managed by environment (LIBREDESK_OIDC__CLIENT_ID / LIBREDESK_OIDC__CLIENT_SECRET)",
   "admin.sso.logoURLDescription": "Custom logo URL to display on the login page.",
   "admin.sso.setThisUrlForCallback": "Set this URI for callback.",
   "admin.status.help": "Create custom conversation statuses to extend default workflow.",

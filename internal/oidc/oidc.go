@@ -29,6 +29,8 @@ type Manager struct {
 	i18n          *i18n.I18n
 	setting       settingsStore
 	encryptionKey string
+	// envClientID is set only when both oidc.client_id and oidc.client_secret are configured.
+	envClientID string
 }
 
 // Opts contains options for initializing the Manager.
@@ -37,6 +39,10 @@ type Opts struct {
 	Lo            *logf.Logger
 	I18n          *i18n.I18n
 	EncryptionKey string
+	// EnvClientID and EnvClientSecret are the oidc.client_id / oidc.client_secret config values.
+	// When both are set, the provider with this client ID gets its secret from config and its credentials are locked in the admin API.
+	EnvClientID     string
+	EnvClientSecret string
 }
 
 // queries contains prepared SQL queries.
@@ -64,7 +70,21 @@ func New(opts Opts, setting settingsStore) (*Manager, error) {
 		i18n:          opts.I18n,
 		setting:       setting,
 		encryptionKey: opts.EncryptionKey,
+		envClientID:   envClientID(opts.EnvClientID, opts.EnvClientSecret),
 	}, nil
+}
+
+// envClientID returns the configured client ID when both credentials are configured, else "".
+func envClientID(clientID, clientSecret string) string {
+	if clientID == "" || clientSecret == "" {
+		return ""
+	}
+	return clientID
+}
+
+// secretFromEnv reports whether the provider with this client ID uses the configured secret.
+func (o *Manager) secretFromEnv(clientID string) bool {
+	return o.envClientID != "" && clientID == o.envClientID
 }
 
 // Get returns an oidc by id.
@@ -87,6 +107,7 @@ func (o *Manager) Get(id int) (models.OIDC, error) {
 		return models.OIDC{}, err
 	}
 	oidc.RedirectURI = fmt.Sprintf(rootURL+redirectURL, oidc.ID)
+	oidc.ClientSecretFromEnv = o.secretFromEnv(oidc.ClientID)
 	return oidc, nil
 }
 
@@ -110,6 +131,7 @@ func (o *Manager) GetAll() ([]models.OIDC, error) {
 	for i := range oidc {
 		oidc[i].RedirectURI = fmt.Sprintf(rootURL+redirectURL, oidc[i].ID)
 		oidc[i].SetProviderLogo()
+		oidc[i].ClientSecretFromEnv = o.secretFromEnv(oidc[i].ClientID)
 	}
 	return oidc, nil
 }
@@ -133,6 +155,7 @@ func (o *Manager) Create(oidc models.OIDC) (models.OIDC, error) {
 	}
 
 	o.decryptOIDC(&createdOIDC)
+	createdOIDC.ClientSecretFromEnv = o.secretFromEnv(createdOIDC.ClientID)
 
 	return createdOIDC, nil
 }
@@ -147,6 +170,9 @@ func (o *Manager) Update(id int, oidc models.OIDC) (models.OIDC, error) {
 	// A masked secret keeps the stored one.
 	if strings.Contains(oidc.ClientSecret, stringutil.PasswordDummy) {
 		oidc.ClientSecret = current.ClientSecret
+	}
+	if oidc, err = o.lockEnvCredentials(current, oidc); err != nil {
+		return models.OIDC{}, err
 	}
 	if err := o.validateCredentials(oidc); err != nil {
 		return models.OIDC{}, err
@@ -165,6 +191,7 @@ func (o *Manager) Update(id int, oidc models.OIDC) (models.OIDC, error) {
 	}
 
 	o.decryptOIDC(&updatedOIDC)
+	updatedOIDC.ClientSecretFromEnv = o.secretFromEnv(updatedOIDC.ClientID)
 
 	return updatedOIDC, nil
 }
@@ -183,10 +210,23 @@ func (o *Manager) validateCredentials(oidc models.OIDC) error {
 	if strings.TrimSpace(oidc.ClientID) == "" {
 		return envelope.NewError(envelope.InputError, o.i18n.Ts("globals.messages.empty", "name", "`client_id`"), nil)
 	}
-	if strings.TrimSpace(oidc.ClientSecret) == "" {
+	if strings.TrimSpace(oidc.ClientSecret) == "" && !o.secretFromEnv(oidc.ClientID) {
 		return envelope.NewError(envelope.InputError, o.i18n.Ts("globals.messages.empty", "name", "`client_secret`"), nil)
 	}
 	return nil
+}
+
+// lockEnvCredentials keeps the stored credentials of a provider whose secret comes from config.
+// The client ID cannot change (it is what ties the provider to the configured secret), and an empty secret keeps the stored one.
+func (o *Manager) lockEnvCredentials(current, req models.OIDC) (models.OIDC, error) {
+	if !o.secretFromEnv(current.ClientID) {
+		return req, nil
+	}
+	if req.ClientID != current.ClientID || (req.ClientSecret != "" && req.ClientSecret != current.ClientSecret) {
+		return models.OIDC{}, envelope.NewError(envelope.InputError, o.i18n.T("admin.sso.credentialsManagedByEnv"), nil)
+	}
+	req.ClientSecret = current.ClientSecret
+	return req, nil
 }
 
 // encryptOIDC encrypts sensitive OIDC fields (ClientID and ClientSecret).

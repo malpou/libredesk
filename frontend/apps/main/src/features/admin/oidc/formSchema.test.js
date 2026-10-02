@@ -71,6 +71,13 @@ describe('OIDC Form Schema', () => {
         expect(() => schema.parse({ ...validForm, client_secret: '' })).toThrow()
     })
 
+    test('client_secret optional when credentials come from env', () => {
+        const envSchema = createFormSchema(mockT, { credentialsFromEnv: true })
+        const { client_secret, ...form } = validForm
+        expect(() => envSchema.parse(form)).not.toThrow()
+        expect(() => envSchema.parse({ ...form, client_secret: '' })).not.toThrow()
+    })
+
     test('logo_url empty string accepted', () => {
         expect(() => schema.parse({ ...validForm, logo_url: '' })).not.toThrow()
     })
