@@ -1,0 +1,55 @@
+# Self-contained build of metsa's libredesk fork (this repo's main: upstream
+# plus our patches), built by MetsaApp/infrastructure's
+# scripts/build-libredesk-fork.sh into ghcr.io/metsaapp/libredesk.
+#
+# Upstream's own Dockerfile expects a binary that has already been built on the
+# host (`make build` -> frontend, backend, stuffbin). That is fine for their
+# release pipeline and useless for us, so this does the whole thing in-image:
+# reproducible, and it does not depend on whatever Go/pnpm happens to be on the
+# machine that runs it.
+#
+# LIBREDESK_VERSION is passed explicitly because the Makefile derives the
+# version from `git describe`, and the build context has no .git.
+
+FROM node:22-alpine AS frontend
+WORKDIR /src
+RUN corepack enable
+COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
+WORKDIR /src/frontend
+RUN pnpm install --frozen-lockfile
+# The whole repo, not just frontend/. ArticleEditor.vue imports
+# `static/public/static/article-content.css` from the REPO ROOT, so a
+# frontend-only context fails the build with a bare ENOENT that reads like a
+# missing dependency rather than a missing directory.
+WORKDIR /src
+COPY . .
+WORKDIR /src/frontend
+ARG LIBREDESK_VERSION=v0.0.0
+ENV VITE_APP_VERSION=${LIBREDESK_VERSION}
+RUN pnpm build:main && pnpm build:widget
+
+FROM golang:1.25-alpine AS backend
+RUN apk --no-cache add git make
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /src/frontend/dist ./frontend/dist
+ARG LIBREDESK_VERSION=v0.0.0
+# Mirrors the Makefile's build-backend + stuff targets. stuffbin embeds the
+# frontend, i18n, schema.sql and static assets into the binary -- without it the
+# app starts and then 404s every page, which looks like a routing bug.
+RUN go install github.com/knadh/stuffbin/...@latest \
+ && CGO_ENABLED=0 go build -a -o libredesk \
+      -ldflags="-s -w -X 'main.versionString=${LIBREDESK_VERSION}' -X 'github.com/abhinavxd/libredesk/internal/version.Version=${LIBREDESK_VERSION}'" \
+      ./cmd/ \
+ && stuffbin -a stuff -in libredesk -out libredesk \
+      frontend/dist i18n schema.sql static
+
+FROM alpine:3.18
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /libredesk
+COPY --from=backend /src/libredesk .
+COPY --from=backend /src/config.sample.toml config.toml
+EXPOSE 9000
+CMD ["./libredesk"]
