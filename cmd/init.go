@@ -1044,7 +1044,11 @@ func initKV() *kvStores {
 	if f := ko.String("nats.creds_file"); f != "" {
 		opts = append(opts, nats.UserCredentials(f))
 	} else if u := ko.String("nats.user"); u != "" {
-		opts = append(opts, nats.UserInfo(u, ko.String("nats.password")))
+		if f := ko.String("nats.password_file"); f != "" {
+			opts = append(opts, nats.UserInfoHandler(passwordFromFile(u, f)))
+		} else {
+			opts = append(opts, nats.UserInfo(u, ko.String("nats.password")))
+		}
 	}
 	nc, err := nats.Connect(cmp.Or(ko.String("nats.url"), nats.DefaultURL), opts...)
 	if err != nil {
@@ -1074,6 +1078,20 @@ func initKV() *kvStores {
 		otpPending:     open("otp_pending", "libredesk_otp_pending", 10*time.Minute),
 		otpState:       open("otp_state", "libredesk_otp_state", 30*time.Minute),
 		rateLimit:      open("ratelimit", "libredesk_ratelimit", 2*time.Minute),
+	}
+}
+
+// passwordFromFile returns user/password credentials whose password is read from file on every
+// connect and reconnect. A rotating secret (a Kubernetes ServiceAccount token an auth callout
+// verifies) is then current each time, not the one the process started with.
+func passwordFromFile(user, file string) func() (string, string) {
+	return func() (string, string) {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			log.Printf("error reading nats.password_file: %v", err)
+			return user, ""
+		}
+		return user, strings.TrimSpace(string(b))
 	}
 }
 
