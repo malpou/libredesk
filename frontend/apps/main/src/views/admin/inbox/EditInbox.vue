@@ -61,7 +61,7 @@ const submitForm = (values) => {
       auth_type: values.auth_type,
       reply_to: values.reply_to,
       enable_plus_addressing: values.enable_plus_addressing,
-      imap: [{ ...values.imap }],
+      imap: values.imap_enabled === false ? [] : [{ ...values.imap }],
       smtp: [{ ...values.smtp }]
     }
 
@@ -75,7 +75,7 @@ const submitForm = (values) => {
       config
     }
 
-    if (payload.config.imap[0].password?.includes('•')) {
+    if (payload.config.imap[0]?.password?.includes('•')) {
       payload.config.imap[0].password = ''
     }
 
@@ -134,8 +134,11 @@ onMounted(async () => {
     let inboxData = resp.data.data
 
     // Modify the inbox data as per the zod schema.
-    if (inboxData?.config?.imap) {
-      inboxData.imap = inboxData?.config?.imap[0]
+    // An inbox saved without IMAP opens with IMAP off, so saving it again
+    // does not start polling a placeholder server.
+    inboxData.imap_enabled = (inboxData?.config?.imap?.length ?? 0) > 0
+    if (inboxData.imap_enabled) {
+      inboxData.imap = inboxData.config.imap[0]
     }
     if (inboxData?.config?.smtp) {
       inboxData.smtp = inboxData?.config?.smtp[0]

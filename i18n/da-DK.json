@@ -128,6 +128,8 @@
   "admin.inbox.idleTimeout.description": "IdleTimeout er maks. tid at afvente ny aktivitet på en forbindelse, før den lukkes og fjernes fra puljen.",
   "admin.inbox.imap.tls.description": "Vælg IMAP-krypteringsmetode.",
   "admin.inbox.imapConfig": "IMAP-opsætning",
+  "admin.inbox.imapEnabled": "Modtag mail via IMAP",
+  "admin.inbox.imapEnabled.description": "Slå fra, når indbakkens mail leveres på anden vis, f.eks. af en API-klient der indsender beskeder. Intet bliver hentet, og ingen IMAP-indstillinger gemmes.",
   "admin.inbox.imapScanInboxSince": "Indbakkeskanningstidsrum",
   "admin.inbox.imapScanInboxSince.description": "Mhp. ydeevneforbedring i store helpdesks med høj e-mailvolumen begrænser dette skanninger til e-mails modtaget i det angivne tidsrum (f.eks., `2t`, `48t`) ved at subtrahere tidsrummet fra aktuelt klokkeslæt.",
   "admin.inbox.imapScanInterval": "Skannningsinterval",
