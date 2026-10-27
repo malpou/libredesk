@@ -4,6 +4,24 @@ import { AUTH_TYPE_PASSWORD, AUTH_TYPE_OAUTH2 } from '@main/constants/auth.js'
 
 const FROM_NAME_TEMPLATE_VARS = ['.Agent.FirstName', '.Agent.LastName', '.Agent.FullName', '.Inbox.Name']
 
+const createImapSchema = (t) => z.object({
+  host: z.string().min(1, t('globals.messages.required')),
+  port: z.number().min(1).max(65535),
+  mailbox: z.string().min(1, t('globals.messages.required')),
+  username: z.string().min(1, t('globals.messages.required')),
+  password: z.string().min(1, t('globals.messages.required')),
+  tls_type: z.enum(['none', 'starttls', 'tls']),
+  tls_skip_verify: z.boolean().optional(),
+  scan_inbox_since: z.string().min(1, t('globals.messages.required')).refine(isGoDuration, {
+    message: t('validation.invalidDuration')
+  }),
+  read_interval: z.string().min(1, t('globals.messages.required')).refine(isGoDuration, {
+    message: t('validation.invalidDuration')
+  })
+})
+
+// imap is only validated while IMAP is on: an inbox whose mail is delivered another way
+// (an API client posting messages) turns it off and is saved with no IMAP config at all.
 export const createFormSchema = (t) => z.object({
   name: z.string().min(1, t('globals.messages.required')),
   from: z.string().min(1, t('globals.messages.required')),
@@ -33,21 +51,8 @@ export const createFormSchema = (t) => z.object({
     provider: z.string().optional(),
     refresh_token: z.string().optional()
   }).optional(),
-  imap: z.object({
-    host: z.string().min(1, t('globals.messages.required')),
-    port: z.number().min(1).max(65535),
-    mailbox: z.string().min(1, t('globals.messages.required')),
-    username: z.string().min(1, t('globals.messages.required')),
-    password: z.string().min(1, t('globals.messages.required')),
-    tls_type: z.enum(['none', 'starttls', 'tls']),
-    tls_skip_verify: z.boolean().optional(),
-    scan_inbox_since: z.string().min(1, t('globals.messages.required')).refine(isGoDuration, {
-      message: t('validation.invalidDuration')
-    }),
-    read_interval: z.string().min(1, t('globals.messages.required')).refine(isGoDuration, {
-      message: t('validation.invalidDuration')
-    })
-  }),
+  imap_enabled: z.boolean().optional().default(true),
+  imap: z.any().optional(),
   smtp: z.object({
     host: z.string().min(1, t('globals.messages.required')),
     port: z.number().min(1).max(65535),
@@ -66,4 +71,14 @@ export const createFormSchema = (t) => z.object({
     hello_hostname: z.string().optional(),
     auth_protocol: z.enum(['login', 'cram', 'plain', 'none'])
   })
+}).superRefine((values, ctx) => {
+  if (values.imap_enabled === false) {
+    return
+  }
+  const result = createImapSchema(t).safeParse(values.imap)
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      ctx.addIssue({ ...issue, path: ['imap', ...issue.path] })
+    }
+  }
 })

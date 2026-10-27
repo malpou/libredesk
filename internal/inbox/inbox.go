@@ -369,9 +369,8 @@ func (m *Manager) Update(id int, inbox imodels.Inbox) (imodels.Inbox, error) {
 			return imodels.Inbox{}, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 		}
 
-		if len(updateCfg.IMAP) == 0 {
-			return imodels.Inbox{}, envelope.NewError(envelope.InputError, m.i18n.T("inbox.emptyIMAP"), nil)
-		}
+		// No IMAP is allowed: the inbox's mail then arrives another way (an API client
+		// posting messages) and nothing is polled.
 
 		if len(updateCfg.SMTP) == 0 {
 			return imodels.Inbox{}, envelope.NewError(envelope.InputError, m.i18n.T("inbox.emptySMTP"), nil)

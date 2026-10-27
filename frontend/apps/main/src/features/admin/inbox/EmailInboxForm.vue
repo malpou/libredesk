@@ -396,6 +396,22 @@
     <div v-show="!isOAuthInbox && setupMethod === 'manual'" class="box p-4 space-y-4">
       <h3 class="font-semibold">{{ $t('admin.inbox.imapConfig') }}</h3>
 
+      <!-- Off for an inbox whose mail arrives another way (an API client posting
+           messages): nothing is polled and the inbox is saved without IMAP. -->
+      <FormField v-slot="{ componentField, handleChange }" name="imap_enabled">
+        <FormItem>
+          <SwitchField
+            :title="$t('admin.inbox.imapEnabled')"
+            :description="$t('admin.inbox.imapEnabled.description')"
+            :checked="componentField.modelValue"
+            @update:checked="handleChange"
+          />
+        </FormItem>
+      </FormField>
+
+      <!-- v-show, not v-if: the fields stay registered, so switching IMAP back on
+           restores what was entered. -->
+      <div v-show="form.values.imap_enabled !== false" class="space-y-4">
       <FormField v-slot="{ componentField }" name="imap.host">
         <FormItem>
           <FormLabel>{{ $t('globals.terms.host') }}</FormLabel>
@@ -505,6 +521,7 @@
           />
         </FormItem>
       </FormField>
+      </div>
     </div>
 
     <!-- SMTP Section -->
@@ -895,6 +912,7 @@ const form = useForm({
     prompt_tags_on_reply: false,
     enable_plus_addressing: true,
     auth_type: AUTH_TYPE_PASSWORD,
+    imap_enabled: true,
     imap: {
       host: 'imap.gmail.com',
       port: 993,

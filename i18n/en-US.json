@@ -299,6 +299,8 @@
   "admin.inbox.idleTimeout.description": "Maximum time an inactive connection must be kept alive before closing it and removing it from the pool.",
   "admin.inbox.imap.tls.description": "Choose the encryption method for IMAP.",
   "admin.inbox.imapConfig": "IMAP Configuration",
+  "admin.inbox.imapEnabled": "Receive mail via IMAP",
+  "admin.inbox.imapEnabled.description": "Turn off when this inbox's mail is delivered another way, such as an API client posting messages. Nothing is polled and no IMAP settings are kept.",
   "admin.inbox.imapScanInboxSince": "Scan Inbox Since",
   "admin.inbox.imapScanInboxSince.description": "To improve performance in large helpdesks with high email volume, this limits scans to emails received since the specified duration (e.g., `2h`, `48h`) by subtracting it from the current time.",
   "admin.inbox.imapScanInterval": "Scan Interval",
