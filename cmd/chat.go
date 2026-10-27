@@ -22,6 +22,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/envelope"
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
 	imodels "github.com/abhinavxd/libredesk/internal/inbox/models"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 	realip "github.com/ferluci/fast-realip"
@@ -34,7 +35,6 @@ import (
 const (
 	maxChatConversationsPerContact  = 50
 	chatConversationRateLimitWindow = 24 * time.Hour
-	widgetSessionPrefix             = "widget_session:"
 	defaultSessionTTL               = 180 * 24 * time.Hour
 	minSessionTTL                   = 1 * time.Hour
 	maxChatMessageLength            = 10000
@@ -47,12 +47,12 @@ const (
 	phoneCountryCodeSuffix          = "_country_code"
 )
 
-// WidgetSession holds session data stored in Redis.
+// WidgetSession holds session data stored in the widget sessions KV bucket.
 type WidgetSession struct {
-	UserID         int
-	InboxID        int
-	IsVisitor      bool
-	ExternalUserID string
+	UserID         int    `json:"user_id"`
+	InboxID        int    `json:"inbox_id"`
+	IsVisitor      bool   `json:"is_visitor"`
+	ExternalUserID string `json:"external_user_id"`
 }
 
 // Claims holds JWT claims for a JWT user.
@@ -408,11 +408,13 @@ func handleAuthExchange(r *fastglue.Request) error {
 	}
 
 	ctx := context.Background()
-	reverseKey := fmt.Sprintf("widget_user:%d:%d", inbox.ID, contactID)
+	reverseKey := kvstore.Key("u", strconv.Itoa(inbox.ID), strconv.Itoa(contactID))
 	sessionTTL := getSessionDuration(config)
 
 	sendSession := func(token string) error {
-		app.redis.Set(ctx, reverseKey, token, sessionTTL)
+		if err := app.kv.widgetSessions.Put(ctx, reverseKey, []byte(token), sessionTTL); err != nil {
+			app.lo.Error("error storing widget session index", "error", err)
+		}
 		return r.SendEnvelope(map[string]any{
 			"session_token": token,
 			"user": map[string]any{
@@ -425,7 +427,8 @@ func handleAuthExchange(r *fastglue.Request) error {
 	}
 
 	// Reuse existing valid session and refresh its TTL.
-	if oldToken, err := app.redis.Get(ctx, reverseKey).Result(); err == nil && oldToken != "" {
+	if e, err := app.kv.widgetSessions.Get(ctx, reverseKey); err == nil && len(e.Value) > 0 {
+		oldToken := string(e.Value)
 		if _, err := loadSession(app, oldToken, config); err == nil {
 			return sendSession(oldToken)
 		}
@@ -950,67 +953,72 @@ func verifyStandardJWT(jwtToken string, inboxSecret string) (Claims, error) {
 	return *claims, nil
 }
 
-// generateSessionToken creates a random session token and stores it in Redis.
+// generateSessionToken creates a random session token and stores its session.
 func generateSessionToken(app *App, userID, inboxID int, isVisitor bool, externalUserID string, ttl time.Duration) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating random token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(b)
-	key := widgetSessionPrefix + token
 
-	ctx := context.Background()
-	fields := map[string]any{
-		"user_id":          strconv.Itoa(userID),
-		"inbox_id":         strconv.Itoa(inboxID),
-		"is_visitor":       strconv.FormatBool(isVisitor),
-		"external_user_id": externalUserID,
+	val, err := json.Marshal(WidgetSession{
+		UserID:         userID,
+		InboxID:        inboxID,
+		IsVisitor:      isVisitor,
+		ExternalUserID: externalUserID,
+	})
+	if err != nil {
+		return "", err
 	}
-	pipe := app.redis.Pipeline()
-	pipe.HSet(ctx, key, fields)
-	pipe.Expire(ctx, key, ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return "", fmt.Errorf("storing session in Redis: %w", err)
+	if _, err := app.kv.widgetSessions.Create(context.Background(), widgetSessionKey(token), val, ttl); err != nil {
+		return "", fmt.Errorf("storing widget session: %w", err)
 	}
 	return token, nil
 }
 
-// loadSession retrieves a session from Redis and refreshes its TTL using the
+// loadSession retrieves a session and slides its expiry forward using the
 // default duration for visitors and the current config duration for contacts.
 func loadSession(app *App, token string, config livechat.Config) (*WidgetSession, error) {
 	ctx := context.Background()
-	key := widgetSessionPrefix + token
+	key := widgetSessionKey(token)
 
-	data, err := app.redis.HGetAll(ctx, key).Result()
+	e, err := app.kv.widgetSessions.Get(ctx, key)
+	if errors.Is(err, kvstore.ErrNotFound) {
+		return nil, fmt.Errorf("session not found or expired")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("looking up session: %w", err)
 	}
-	if len(data) == 0 {
-		return nil, fmt.Errorf("session not found or expired")
+	var sess WidgetSession
+	if err := json.Unmarshal(e.Value, &sess); err != nil {
+		return nil, fmt.Errorf("decoding session: %w", err)
 	}
-
-	userID, _ := strconv.Atoi(data["user_id"])
-	inboxID, _ := strconv.Atoi(data["inbox_id"])
-	isVisitor, _ := strconv.ParseBool(data["is_visitor"])
 
 	ttl := getSessionDuration(config)
-	if isVisitor {
+	if sess.IsVisitor {
 		ttl = defaultSessionTTL
 	}
-	app.redis.Expire(ctx, key, ttl)
-
-	return &WidgetSession{
-		UserID:         userID,
-		InboxID:        inboxID,
-		IsVisitor:      isVisitor,
-		ExternalUserID: data["external_user_id"],
-	}, nil
+	// Move the expiry at most once a minute rather than writing on every widget request; it can
+	// also move back, when the inbox's configured session duration was shortened.
+	// A revision conflict means a concurrent request already refreshed or deleted the session;
+	// writing by revision keeps a refresh from resurrecting a deleted session.
+	expires := app.kv.widgetSessions.ExpiresIn(ttl)
+	if d := expires.Sub(e.Expires); d >= time.Minute || d <= -time.Minute {
+		if _, err := app.kv.widgetSessions.Update(ctx, key, e.Value, expires, e.Revision); err != nil && !errors.Is(err, kvstore.ErrConflict) {
+			app.lo.Error("error refreshing widget session", "error", err)
+		}
+	}
+	return &sess, nil
 }
 
-// deleteSessionToken removes a session from Redis.
+// deleteSessionToken removes a session.
 func deleteSessionToken(app *App, token string) {
-	app.redis.Del(context.Background(), widgetSessionPrefix+token)
+	if err := app.kv.widgetSessions.Delete(context.Background(), widgetSessionKey(token)); err != nil {
+		app.lo.Error("error deleting widget session", "error", err)
+	}
 }
+
+func widgetSessionKey(token string) string { return kvstore.Key("s", token) }
 
 // marshalCustomAttributes marshals custom attributes to JSON, returning "{}" on error or empty input.
 func marshalCustomAttributes(attrs map[string]any, app *App) []byte {

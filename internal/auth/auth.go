@@ -12,17 +12,16 @@ import (
 
 	amodels "github.com/abhinavxd/libredesk/internal/auth/models"
 	"github.com/abhinavxd/libredesk/internal/envelope"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/ssrf"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	"github.com/abhinavxd/libredesk/internal/user/models"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/knadh/go-i18n"
-	"github.com/redis/go-redis/v9"
 	"github.com/valyala/fasthttp"
 	"github.com/volatiletech/null/v9"
 	"github.com/zerodha/fastglue"
 	"github.com/zerodha/logf"
-	sessredisstore "github.com/zerodha/simplesessions/stores/redis/v3"
 	"github.com/zerodha/simplesessions/v3"
 
 	"golang.org/x/oauth2"
@@ -68,12 +67,11 @@ type Auth struct {
 	verifiers  map[int]*oidc.IDTokenVerifier
 	sess       *simplesessions.Manager
 	logger     *logf.Logger
-	rd         *redis.Client
 	oidcClient *http.Client
 }
 
 // New creates an Auth service with configured OIDC providers.
-func New(cfg Config, i18n *i18n.I18n, rd *redis.Client, logger *logf.Logger, dialControl ssrf.Control) (*Auth, error) {
+func New(cfg Config, i18n *i18n.I18n, sessions *kvstore.Store, logger *logf.Logger, dialControl ssrf.Control) (*Auth, error) {
 	oauthCfgs := make(map[int]oauth2.Config)
 	verifiers := make(map[int]*oidc.IDTokenVerifier)
 
@@ -117,9 +115,8 @@ func New(cfg Config, i18n *i18n.I18n, rd *redis.Client, logger *logf.Logger, dia
 		},
 	})
 
-	st := sessredisstore.New(context.TODO(), rd)
-	st.SetTTL(lifetime, false)
-	sess.UseStore(st)
+	// Sessions end a fixed lifetime after login; activity does not extend them.
+	sess.UseStore(kvstore.NewSessionStore(sessions, lifetime))
 	sess.SetCookieHooks(simpleSessGetCookieCB, simpleSessSetCookieCB)
 
 	return &Auth{
@@ -129,7 +126,6 @@ func New(cfg Config, i18n *i18n.I18n, rd *redis.Client, logger *logf.Logger, dia
 		verifiers:  verifiers,
 		sess:       sess,
 		logger:     logger,
-		rd:         rd,
 		oidcClient: oidcClient,
 	}, nil
 }

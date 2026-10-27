@@ -3,10 +3,9 @@ package main
 import (
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
+	"github.com/abhinavxd/libredesk/internal/kvstore/kvtest"
 	"github.com/valyala/fasthttp"
-	goredis "github.com/zerodha/fastcache/stores/goredis/v9"
 	"github.com/zerodha/fastcache/v4"
 	"github.com/zerodha/fastglue"
 )
@@ -193,8 +192,7 @@ func TestHelpCenterPageCacheKeepsNoIndexOnHits(t *testing.T) {
 
 func newTestFastCache(t *testing.T) *fastcache.FastCache {
 	t.Helper()
-	mr := miniredis.RunT(t)
-	return fastcache.New(goredis.New(goredis.Config{Prefix: fastCachePrefix}, redis.NewClient(&redis.Options{Addr: mr.Addr()})))
+	return fastcache.New(kvstore.NewPageCache(kvtest.Bucket(t, "hc_cache"), 1<<20))
 }
 
 func request(uri, ifNoneMatch string) *fastglue.Request {

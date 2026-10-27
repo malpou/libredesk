@@ -13,8 +13,10 @@ services:
     networks:
       - libredesk
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_started
+      nats-buckets:
+        condition: service_completed_successfully
     volumes:
       - ./uploads:/libredesk/uploads:rw 
       - ./config.toml:/libredesk/config.toml
@@ -43,22 +45,37 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  # Redis
-  redis:
-    image: redis:7-alpine
-    container_name: libredesk_redis
+  # NATS with JetStream, for libredesk's KV buckets.
+  nats:
+    image: nats:2.12-alpine
+    container_name: libredesk_nats
     restart: unless-stopped
+    command: ["-js", "-sd", "/data"]
     ports:
       # Only bind on the local interface.
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:4222:4222"
     networks:
       - libredesk
     volumes:
-      - redis-data:/data
+      - nats-data:/data
+
+  # Creates the KV buckets libredesk expects; libredesk never creates them itself.
+  nats-buckets:
+    image: natsio/nats-box:latest
+    container_name: libredesk_nats_buckets
+    depends_on:
+      - nats
+    environment:
+      NATS_URL: nats://nats:4222
+    networks:
+      - libredesk
+    volumes:
+      - ./scripts/nats-kv-buckets.sh:/nats-kv-buckets.sh:ro
+    command: ["sh", "-c", "until nats kv ls >/dev/null 2>&1; do sleep 1; done; sh /nats-kv-buckets.sh"]
 
 networks:
   libredesk:
 
 volumes:
   postgres-data:
-  redis-data:
+  nats-data:

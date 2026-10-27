@@ -281,7 +281,7 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		}
 		return m.isConversationVerified(conv.UUID, conv.Contact.Email.String)
 	}
-	// Snapshot for the run-start registration decisions (one Redis read); tctx still gets the live
+	// Snapshot for the run-start registration decisions (one KV read); tctx still gets the live
 	// closure so mid-turn verification is picked up per tool call.
 	runVerified := verified()
 	m.lo.Debug("ai agent verification state", "conversation_uuid", conv.UUID, "channel", conv.InboxChannel, "contact_type", conv.Contact.Type, "has_email", conv.Contact.Email.String != "", "verified", runVerified)

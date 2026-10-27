@@ -385,7 +385,7 @@ func handleGetContactPageVisits(r *fastglue.Request) error {
 		return sendErrorEnvelope(r, err)
 	}
 
-	pages := getPageVisitsFromRedis(app, conv.ContactID)
+	pages := getPageVisits(app, conv.ContactID)
 	return r.SendEnvelope(pages)
 }
 

@@ -1,22 +1,70 @@
 package aiagent
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
+	"github.com/abhinavxd/libredesk/internal/kvstore/kvtest"
 	"github.com/zerodha/logf"
 )
 
-func newOTPTestManager(t *testing.T) (*Manager, *miniredis.Miniredis) {
+// otpTestEnv exposes the raw buckets and clock behind a test manager.
+type otpTestEnv struct {
+	t       *testing.T
+	srv     *kvtest.Server
+	clock   *kvtest.Clock
+	pending *kvstore.Store
+	state   *kvstore.Store
+}
+
+func newOTPTestManager(t *testing.T) (*Manager, *otpTestEnv) {
 	t.Helper()
-	mr := miniredis.RunT(t)
+	srv := kvtest.Start(t)
+	env := &otpTestEnv{t: t, srv: srv, clock: kvtest.NewClock(), pending: srv.Bucket("otp_pending"), state: srv.Bucket("otp_state")}
+	env.pending.SetClock(env.clock.Now)
+	env.state.SetClock(env.clock.Now)
 	lo := logf.New(logf.Opts{})
-	return &Manager{
-		lo:    &lo,
-		redis: redis.NewClient(&redis.Options{Addr: mr.Addr()}),
-	}, mr
+	return &Manager{lo: &lo, otpPending: env.pending, otpState: env.state}, env
+}
+
+// set writes a raw value with no expiry, standing in for data written by an older build.
+func (e *otpTestEnv) set(st *kvstore.Store, key, val string) {
+	e.t.Helper()
+	if err := st.Put(context.Background(), key, []byte(val), 0); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *otpTestEnv) get(st *kvstore.Store, key string) (string, bool) {
+	v, err := st.Get(context.Background(), key)
+	if errors.Is(err, kvstore.ErrNotFound) {
+		return "", false
+	}
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return string(v.Value), true
+}
+
+func (e *otpTestEnv) exists(st *kvstore.Store, key string) bool {
+	_, ok := e.get(st, key)
+	return ok
+}
+
+// ttl returns how long the key has left on the test clock.
+func (e *otpTestEnv) ttl(st *kvstore.Store, key string) time.Duration {
+	e.t.Helper()
+	v, err := st.Get(context.Background(), key)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return v.Expires.Sub(e.clock.Now())
 }
 
 func TestIsConversationVerified(t *testing.T) {
@@ -27,7 +75,7 @@ func TestIsConversationVerified(t *testing.T) {
 		t.Error("no verified key must mean unverified")
 	}
 
-	mr.Set(otpVerifiedKey(conv), "john@example.com")
+	mr.set(mr.state, otpVerifiedKey(conv), "john@example.com")
 	if !m.isConversationVerified(conv, "john@example.com") {
 		t.Error("matching email must be verified")
 	}
@@ -46,7 +94,7 @@ func TestIsConversationVerified(t *testing.T) {
 	}
 
 	// Value written by a build that stored a bare flag instead of the email.
-	mr.Set(otpVerifiedKey("conv-legacy"), "1")
+	mr.set(mr.state, otpVerifiedKey("conv-legacy"), "1")
 	if m.isConversationVerified("conv-legacy", "john@example.com") {
 		t.Error("legacy flag value must be unverified")
 	}
@@ -72,10 +120,10 @@ func TestCheckPendingOTP(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("correct code = (%v, %v), want (true, nil)", ok, err)
 	}
-	if got, _ := mr.Get(otpVerifiedKey(conv)); got != email {
+	if got, _ := mr.get(mr.state, otpVerifiedKey(conv)); got != email {
 		t.Errorf("verified value = %q, want the normalized attested email %q", got, email)
 	}
-	if mr.Exists(otpPendingKey(conv)) {
+	if mr.exists(mr.pending, otpPendingKey(conv)) {
 		t.Error("pending key must be deleted on match")
 	}
 	if !m.isConversationVerified(conv, email) {
@@ -100,7 +148,7 @@ func TestCheckPendingOTPAttemptCap(t *testing.T) {
 			t.Fatal("wrong code must not verify")
 		}
 	}
-	if mr.Exists(otpPendingKey(conv)) {
+	if mr.exists(mr.pending, otpPendingKey(conv)) {
 		t.Error("pending key must be deleted at the attempt cap")
 	}
 	if ok, _ := m.checkPendingOTP(conv, code); ok {
@@ -113,23 +161,23 @@ func TestCheckPendingOTPLegacyAndCorruptPayloads(t *testing.T) {
 	const conv = "conv-a"
 
 	// Pending record from a build that stored no attested email.
-	mr.Set(otpPendingKey(conv), `{"code":"123456"}`)
+	mr.set(mr.pending, otpPendingKey(conv), `{"code":"123456"}`)
 	ok, err := m.checkPendingOTP(conv, "123456")
 	if err != nil || ok {
 		t.Errorf("legacy pending without email = (%v, %v), want (false, nil)", ok, err)
 	}
-	if mr.Exists(otpPendingKey(conv)) {
+	if mr.exists(mr.pending, otpPendingKey(conv)) {
 		t.Error("legacy pending record must be deleted")
 	}
-	if mr.Exists(otpVerifiedKey(conv)) {
+	if mr.exists(mr.state, otpVerifiedKey(conv)) {
 		t.Error("legacy pending record must never set the verified key")
 	}
 
-	mr.Set(otpPendingKey(conv), "not-json")
+	mr.set(mr.pending, otpPendingKey(conv), "not-json")
 	if ok, err := m.checkPendingOTP(conv, "123456"); err == nil || ok {
 		t.Errorf("corrupt pending = (%v, %v), want (false, error)", ok, err)
 	}
-	if mr.Exists(otpPendingKey(conv)) {
+	if mr.exists(mr.pending, otpPendingKey(conv)) {
 		t.Error("corrupt pending record must be deleted")
 	}
 }
@@ -138,7 +186,7 @@ func TestClearConversationVerified(t *testing.T) {
 	m, mr := newOTPTestManager(t)
 	const conv, email = "conv-a", "john@example.com"
 
-	mr.Set(otpVerifiedKey(conv), email)
+	mr.set(mr.state, otpVerifiedKey(conv), email)
 	if err := m.storePendingOTP(conv, "123456", email); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +196,7 @@ func TestClearConversationVerified(t *testing.T) {
 	if m.isConversationVerified(conv, email) {
 		t.Error("conversation must be unverified after clear")
 	}
-	if mr.Exists(otpPendingKey(conv)) {
+	if mr.exists(mr.pending, otpPendingKey(conv)) {
 		t.Error("pending key must be deleted on clear")
 	}
 }
@@ -182,16 +230,16 @@ func TestVerifiedTTL(t *testing.T) {
 	if err := m.storePendingOTP(conv, "123456", email); err != nil {
 		t.Fatal(err)
 	}
-	if got := mr.TTL(otpPendingKey(conv)); got != otpPendingTTL {
+	if got := mr.ttl(mr.pending, otpPendingKey(conv)); got != otpPendingTTL {
 		t.Errorf("pending TTL = %v, want %v", got, otpPendingTTL)
 	}
 	if ok, _ := m.checkPendingOTP(conv, "123456"); !ok {
 		t.Fatal("verification must succeed")
 	}
-	if got := mr.TTL(otpVerifiedKey(conv)); got != otpVerifiedTTL {
+	if got := mr.ttl(mr.state, otpVerifiedKey(conv)); got != otpVerifiedTTL {
 		t.Errorf("verified TTL = %v, want %v", got, otpVerifiedTTL)
 	}
-	mr.FastForward(otpVerifiedTTL + time.Second)
+	mr.clock.Advance(otpVerifiedTTL + time.Second)
 	if m.isConversationVerified(conv, email) {
 		t.Error("conversation must be unverified after the verified TTL")
 	}
@@ -204,21 +252,128 @@ func TestWrongAttemptKeepsPendingTTL(t *testing.T) {
 	if err := m.storePendingOTP(conv, "123456", "john@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	mr.FastForward(otpPendingTTL / 2)
+	mr.clock.Advance(otpPendingTTL / 2)
 	if ok, _ := m.checkPendingOTP(conv, "000000"); ok {
 		t.Fatal("wrong code must not verify")
 	}
-	if got := mr.TTL(otpPendingKey(conv)); got != otpPendingTTL/2 {
+	if got := mr.ttl(mr.pending, otpPendingKey(conv)); got != otpPendingTTL/2 {
 		t.Errorf("pending TTL after a wrong attempt = %v, want %v", got, otpPendingTTL/2)
 	}
 }
 
-// Guards against the redis client failing open on connection errors.
-func TestVerifiedFailsClosedOnRedisError(t *testing.T) {
+// Guards against the store failing open on connection errors.
+func TestVerifiedFailsClosedOnStoreError(t *testing.T) {
 	m, mr := newOTPTestManager(t)
-	mr.Close()
+	mr.set(mr.state, otpVerifiedKey("conv-a"), "john@example.com")
+	mr.srv.Shutdown()
 	if m.isConversationVerified("conv-a", "john@example.com") {
-		t.Error("a redis error must mean unverified")
+		t.Error("a store error must mean unverified")
+	}
+}
+
+// concurrencyRounds repeats each race on a fresh conversation so a lost update shows up reliably.
+const concurrencyRounds = 25
+
+// runConcurrently starts n calls of fn at once and waits for them.
+func runConcurrently(n int, fn func(i int)) {
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			fn(i)
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
+
+// Parallel wrong guesses must each burn one attempt: with the cap at otpMaxAttempts, no more
+// than that many guesses may be evaluated against the code, however many arrive at once.
+func TestCheckPendingOTPAttemptCapUnderConcurrency(t *testing.T) {
+	m, mr := newOTPTestManager(t)
+	const code = "123456"
+
+	for round := range concurrencyRounds {
+		conv := fmt.Sprintf("conv-%d", round)
+		if err := m.storePendingOTP(conv, code, "john@example.com"); err != nil {
+			t.Fatal(err)
+		}
+		runConcurrently(20, func(int) {
+			if ok, err := m.checkPendingOTP(conv, "000000"); ok || err != nil {
+				t.Errorf("wrong guess = (%v, %v), want (false, nil)", ok, err)
+			}
+		})
+		if mr.exists(mr.pending, otpPendingKey(conv)) {
+			t.Fatalf("round %d: pending code survived more wrong guesses than the attempt cap", round)
+		}
+		if ok, _ := m.checkPendingOTP(conv, code); ok {
+			t.Fatalf("round %d: correct code verified after the attempt cap was spent concurrently", round)
+		}
+	}
+}
+
+// A correct code sent by many requests at once must verify exactly one of them.
+func TestCheckPendingOTPSingleUseUnderConcurrency(t *testing.T) {
+	m, mr := newOTPTestManager(t)
+	const email, code = "john@example.com", "123456"
+
+	for round := range concurrencyRounds {
+		conv := fmt.Sprintf("conv-%d", round)
+		if err := m.storePendingOTP(conv, code, email); err != nil {
+			t.Fatal(err)
+		}
+		var wins atomic.Int32
+		runConcurrently(20, func(int) {
+			ok, err := m.checkPendingOTP(conv, code)
+			if err != nil {
+				t.Errorf("check: %v", err)
+			}
+			if ok {
+				wins.Add(1)
+			}
+		})
+		if got := wins.Load(); got != 1 {
+			t.Fatalf("round %d: correct code verified %d requests, want exactly 1", round, got)
+		}
+		if mr.exists(mr.pending, otpPendingKey(conv)) {
+			t.Fatalf("round %d: pending key must be consumed by the winning request", round)
+		}
+		if !m.isConversationVerified(conv, email) {
+			t.Fatalf("round %d: conversation must be verified", round)
+		}
+	}
+}
+
+func TestOTPSendCap(t *testing.T) {
+	m, mr := newOTPTestManager(t)
+	const conv = "conv-a"
+
+	for i := range otpMaxSends {
+		if capped, err := m.otpSendCapReached(conv, "john+otp@example.com"); err != nil || capped {
+			t.Fatalf("send %d: capped = (%v, %v), want (false, nil)", i, capped, err)
+		}
+		if err := m.incrOTPSends(conv, "John+OTP@example.com"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if capped, _ := m.otpSendCapReached(conv, "john+otp@example.com"); !capped {
+		t.Error("per-address cap must be reached")
+	}
+	if capped, _ := m.otpSendCapReached(conv, "other@example.com"); capped {
+		t.Error("a fresh address must have its own budget while the conversation budget lasts")
+	}
+
+	// The budget window starts at the first send and later sends must not extend it.
+	mr.clock.Advance(otpVerifiedTTL - time.Minute)
+	if err := m.incrOTPSends(conv, "other@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	mr.clock.Advance(2 * time.Minute)
+	if capped, _ := m.otpSendCapReached(conv, "john+otp@example.com"); capped {
+		t.Error("the per-address budget must reset once its window ends")
 	}
 }
 

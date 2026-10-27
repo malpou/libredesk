@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"html/template"
@@ -21,6 +22,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/envelope"
 	"github.com/abhinavxd/libredesk/internal/helpcenter"
 	hcmodels "github.com/abhinavxd/libredesk/internal/helpcenter/models"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/media"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	realip "github.com/ferluci/fast-realip"
@@ -47,8 +49,6 @@ const (
 	schemaOrgContext = "https://schema.org"
 
 	helpCenterCacheControl = "public, no-cache"
-
-	fastCachePrefix = "libredesk:cache:"
 
 	helpCenterCacheTTL = 30 * time.Minute
 
@@ -1004,13 +1004,13 @@ func handleHelpCenterArticleFeedback(r *fastglue.Request) error {
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
-	dedupKey := fmt.Sprintf("help_center:feedback:%d:%s", article.ID, realip.FromRequest(r.RequestCtx))
-	if ok, err := app.redis.SetNX(r.RequestCtx, dedupKey, "1", articleFeedbackDedupTTL).Result(); err == nil && !ok {
+	dedupKey := kvstore.Key(strconv.Itoa(article.ID), realip.FromRequest(r.RequestCtx))
+	if _, err := app.kv.hcFeedback.Create(r.RequestCtx, dedupKey, []byte("1"), articleFeedbackDedupTTL); errors.Is(err, kvstore.ErrExists) {
 		return r.SendEnvelope(true)
 	}
 	if err := app.helpcenter.RecordArticleFeedback(article.ID, req.Helpful); err != nil {
 		// A failed insert must not consume the reader's vote for the dedup window.
-		app.redis.Del(r.RequestCtx, dedupKey)
+		app.kv.hcFeedback.Delete(r.RequestCtx, dedupKey)
 		return sendErrorEnvelope(r, err)
 	}
 	return r.SendEnvelope(true)
