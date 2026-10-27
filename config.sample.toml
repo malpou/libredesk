@@ -99,15 +99,29 @@ max_idle = 30
 # Maximum time a connection can be reused before being closed
 max_lifetime = "300s"
 
-# Redis.
-[redis]
-# url parameter overrides other redis config options
-# url = "redis://user:password@host:port/db"
-# If running locally, use `localhost:6379`.
-address = "redis:6379"
+# NATS JetStream KV holds sessions, the help center page cache, rate limit counters and other
+# short-lived state. libredesk binds to existing buckets and never creates them: run
+# scripts/nats-kv-buckets.sh (or provision the same buckets) first. Startup fails if a bucket
+# is missing or its max age is shorter than the values libredesk keeps in it.
+[nats]
+# If running locally, use `nats://localhost:4222`.
+url = "nats://nats:4222"
+# Credentials file (JWT + nkey). Takes precedence over user/password when both are set.
+creds_file = ""
 user = ""
 password = ""
-db = 0
+
+# Bucket names; the defaults match scripts/nats-kv-buckets.sh.
+[nats.buckets]
+sessions = "libredesk_sessions"
+widget_sessions = "libredesk_widget_sessions"
+hc_cache = "libredesk_hc_cache"
+hc_feedback = "libredesk_hc_feedback"
+oauth_state = "libredesk_oauth_state"
+page_visits = "libredesk_page_visits"
+otp_pending = "libredesk_otp_pending"
+otp_state = "libredesk_otp_state"
+ratelimit = "libredesk_ratelimit"
 
 [message]
 # Number of workers processing outgoing message queue

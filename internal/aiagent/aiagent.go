@@ -17,13 +17,13 @@ import (
 	"github.com/abhinavxd/libredesk/internal/dbutil"
 	"github.com/abhinavxd/libredesk/internal/envelope"
 	"github.com/abhinavxd/libredesk/internal/inbox"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/media"
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
 	"github.com/abhinavxd/libredesk/internal/setting"
 	"github.com/abhinavxd/libredesk/internal/user"
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
-	"github.com/redis/go-redis/v9"
 	"github.com/zerodha/logf"
 )
 
@@ -74,7 +74,9 @@ type Manager struct {
 	setting  *setting.Manager
 	user     *user.Manager
 	notifier *notifier.Service
-	redis    *redis.Client
+	// otpPending holds codes awaiting entry; otpState holds verified emails and send counters.
+	otpPending *kvstore.Store
+	otpState   *kvstore.Store
 
 	maxSteps           int
 	maxHistoryMessages int
@@ -110,7 +112,7 @@ type Opts struct {
 }
 
 // New creates the AI agent manager.
-func New(opts Opts, aiManager *ai.Manager, convo *conversation.Manager, inboxManager *inbox.Manager, mediaManager *media.Manager, settingManager *setting.Manager, userManager *user.Manager, notifierService *notifier.Service, rdb *redis.Client) (*Manager, error) {
+func New(opts Opts, aiManager *ai.Manager, convo *conversation.Manager, inboxManager *inbox.Manager, mediaManager *media.Manager, settingManager *setting.Manager, userManager *user.Manager, notifierService *notifier.Service, otpPending, otpState *kvstore.Store) (*Manager, error) {
 	var q queries
 	if err := dbutil.ScanSQLFile("queries.sql", &q, opts.DB, efs); err != nil {
 		return nil, err
@@ -129,7 +131,8 @@ func New(opts Opts, aiManager *ai.Manager, convo *conversation.Manager, inboxMan
 		setting:            settingManager,
 		user:               userManager,
 		notifier:           notifierService,
-		redis:              rdb,
+		otpPending:         otpPending,
+		otpState:           otpState,
 		queue:              make(chan int, opts.QueueSize),
 		inflight:           map[int]bool{},
 		pending:            map[int]bool{},

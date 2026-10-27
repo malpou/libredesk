@@ -1,15 +1,19 @@
 package ratelimit
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
 
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	realip "github.com/ferluci/fast-realip"
-	"github.com/redis/go-redis/v9"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/logf"
 )
+
+// window is the length of one rate limit window.
+const window = time.Minute
 
 // Rule defines a rate limiting rule for a named group of endpoints.
 type Rule struct {
@@ -18,17 +22,17 @@ type Rule struct {
 	RequestsPerMinute int
 }
 
-// Limiter handles rate limiting using Redis.
+// Limiter handles rate limiting with a fixed-window counter per rule and client IP.
 type Limiter struct {
-	redis *redis.Client
+	store *kvstore.Store
 	rules map[string]Rule
 	lo    *logf.Logger
 }
 
 // New creates a new rate limiter.
-func New(redisClient *redis.Client, lo *logf.Logger) *Limiter {
+func New(store *kvstore.Store, lo *logf.Logger) *Limiter {
 	return &Limiter{
-		redis: redisClient,
+		store: store,
 		lo:    lo,
 		rules: make(map[string]Rule),
 	}
@@ -47,25 +51,20 @@ func (l *Limiter) Check(ctx *fasthttp.RequestCtx, ruleName string) error {
 	}
 
 	clientIP := realip.FromRequest(ctx)
-	key := fmt.Sprintf("rate_limit:%s:%s", ruleName, clientIP)
-
 	now := time.Now()
 	nowUnix := now.Unix()
-	nowNano := now.UnixNano()
-	windowStart := strconv.FormatInt(nowUnix-60, 10)
+	windowStart := now.Truncate(window).Unix()
+	key := kvstore.Key("rl", ruleName, clientIP, strconv.FormatInt(windowStart, 10))
 
-	// Single pipeline: cleanup, add, count, set expiry.
-	pipe := l.redis.Pipeline()
-	pipe.ZRemRangeByScore(ctx, key, "-inf", windowStart)
-	pipe.ZAdd(ctx, key, redis.Z{Score: float64(nowUnix), Member: nowNano})
-	countCmd := pipe.ZCard(ctx, key)
-	pipe.Expire(ctx, key, time.Minute*2)
-	if _, err := pipe.Exec(ctx); err != nil {
+	// Fail open: a store outage must not lock everyone out.
+	sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	count, err := l.store.Incr(sctx, key, 2*window)
+	if err != nil {
 		l.lo.Warn("rate limit check unavailable, allowing request", "rule", ruleName, "error", err)
 		return nil
 	}
 
-	count := countCmd.Val()
 	limit := int64(rule.RequestsPerMinute)
 
 	ctx.Response.Header.Set("X-RateLimit-Limit", strconv.Itoa(rule.RequestsPerMinute))

@@ -8,8 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	"github.com/abhinavxd/libredesk/internal/kvstore/kvtest"
 	"github.com/zerodha/logf"
 )
 
@@ -103,12 +102,10 @@ func TestValidateHandoffFormUsesSubmittedContactDetails(t *testing.T) {
 }
 
 func TestWidgetSessionStorageFailureIsVisible(t *testing.T) {
-	server := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { client.Close() })
+	srv := kvtest.Start(t)
 	var logs bytes.Buffer
 	lo := logf.New(logf.Opts{Writer: &logs})
-	app := &App{lo: &lo, redis: client}
+	app := &App{lo: &lo, kv: &kvStores{widgetSessions: srv.Bucket("widget_sessions")}}
 	const token = "private-session-token"
 	if _, err := loadSession(app, token, livechat.Config{}); err == nil {
 		t.Fatal("missing session accepted")
@@ -116,7 +113,7 @@ func TestWidgetSessionStorageFailureIsVisible(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Fatal("expired session produced an application error")
 	}
-	server.SetError("storage unavailable")
+	srv.Shutdown()
 	if _, err := loadSession(app, token, livechat.Config{}); err == nil {
 		t.Fatal("storage failure ignored")
 	}

@@ -7,34 +7,28 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	amodels "github.com/abhinavxd/libredesk/internal/auth/models"
 	"github.com/abhinavxd/libredesk/internal/envelope"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/ssrf"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	"github.com/abhinavxd/libredesk/internal/user/models"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/knadh/go-i18n"
-	"github.com/redis/go-redis/v9"
 	"github.com/valyala/fasthttp"
 	"github.com/volatiletech/null/v9"
 	"github.com/zerodha/fastglue"
 	"github.com/zerodha/logf"
-	sessredisstore "github.com/zerodha/simplesessions/stores/redis/v3"
 	"github.com/zerodha/simplesessions/v3"
 
 	"golang.org/x/oauth2"
 )
 
-const (
-	defaultSessionLifetime = 9 * time.Hour
-	sessionKeyPrefix       = "session:"
-	userSessionKeyPrefix   = "user_sessions:"
-)
+const defaultSessionLifetime = 9 * time.Hour
 
 // ErrOIDCInvalidClient reports the provider rejecting the client credentials, typically an expired or wrong client secret.
 var ErrOIDCInvalidClient = errors.New("oidc provider rejected client credentials")
@@ -74,12 +68,12 @@ type Auth struct {
 	redirectURLs map[int]func() (string, error)
 	sess         *simplesessions.Manager
 	logger       *logf.Logger
-	rd           *redis.Client
+	sessions     *kvstore.SessionStore
 	oidcClient   *http.Client
 }
 
 // New creates an Auth service with configured OIDC providers.
-func New(cfg Config, i18n *i18n.I18n, rd *redis.Client, logger *logf.Logger, dialControl ssrf.Control) (*Auth, error) {
+func New(cfg Config, i18n *i18n.I18n, sessions *kvstore.Store, logger *logf.Logger, dialControl ssrf.Control) (*Auth, error) {
 	oauthCfgs := make(map[int]oauth2.Config)
 	verifiers := make(map[int]*oidc.IDTokenVerifier)
 	redirectURLs := make(map[int]func() (string, error))
@@ -125,10 +119,9 @@ func New(cfg Config, i18n *i18n.I18n, rd *redis.Client, logger *logf.Logger, dia
 		},
 	})
 
-	st := sessredisstore.New(context.TODO(), rd)
-	st.SetPrefix(sessionKeyPrefix)
-	st.SetTTL(lifetime, false)
-	sess.UseStore(st)
+	// Sessions end a fixed lifetime after login; activity does not extend them.
+	sessStore := kvstore.NewSessionStore(sessions, lifetime)
+	sess.UseStore(sessStore)
 	sess.SetCookieHooks(simpleSessGetCookieCB, simpleSessSetCookieCB)
 
 	return &Auth{
@@ -139,7 +132,7 @@ func New(cfg Config, i18n *i18n.I18n, rd *redis.Client, logger *logf.Logger, dia
 		redirectURLs: redirectURLs,
 		sess:         sess,
 		logger:       logger,
-		rd:           rd,
+		sessions:     sessStore,
 		oidcClient:   oidcClient,
 	}, nil
 }
@@ -289,12 +282,7 @@ func (a *Auth) SaveSession(user amodels.User, r *fastglue.Request) error {
 		return err
 	}
 
-	indexKey := userSessionKeyPrefix + strconv.Itoa(user.ID)
-	p := a.rd.TxPipeline()
-	p.SAdd(r.RequestCtx, indexKey, sess.ID())
-	p.ExpireNX(r.RequestCtx, indexKey, a.cfg.SessionLifetime)
-	p.ExpireGT(r.RequestCtx, indexKey, a.cfg.SessionLifetime)
-	if _, err := p.Exec(r.RequestCtx); err != nil {
+	if err := a.sessions.IndexUserSession(r.RequestCtx, user.ID, sess.ID()); err != nil {
 		a.logger.Error("error indexing login session", "user_id", user.ID, "error", err)
 		return err
 	}
@@ -441,7 +429,7 @@ func (a *Auth) DestroySession(r *fastglue.Request) error {
 		return err
 	}
 	if userID > 0 {
-		if err := a.rd.SRem(r.RequestCtx, userSessionKeyPrefix+strconv.Itoa(userID), sess.ID()).Err(); err != nil {
+		if err := a.sessions.UnindexUserSession(r.RequestCtx, userID, sess.ID()); err != nil {
 			a.logger.Error("error removing session index entry", "user_id", userID, "error", err)
 			return err
 		}
@@ -453,7 +441,7 @@ func (a *Auth) DestroyUserSessions(ctx context.Context, userID int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if err := DestroyUserSessions(ctx, a.rd, userID); err != nil {
+	if err := a.sessions.DestroyUserSessions(ctx, userID); err != nil {
 		a.logger.Error("error destroying user sessions", "user_id", userID, "error", err)
 		return envelope.NewError(envelope.GeneralError, a.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
@@ -469,21 +457,10 @@ func (a *Auth) resolveRedirectURL(providerID int) (string, error) {
 	return fn()
 }
 
-func DestroyUserSessions(ctx context.Context, rd *redis.Client, userID int) error {
-	indexKey := userSessionKeyPrefix + strconv.Itoa(userID)
-	ids, err := rd.SMembers(ctx, indexKey).Result()
-	if err != nil {
-		return fmt.Errorf("fetching user sessions: %w", err)
-	}
-	keys := make([]string, 0, len(ids)+1)
-	keys = append(keys, indexKey)
-	for _, id := range ids {
-		keys = append(keys, sessionKeyPrefix+id)
-	}
-	if err := rd.Del(ctx, keys...).Err(); err != nil {
-		return fmt.Errorf("destroying user sessions: %w", err)
-	}
-	return nil
+// DestroyUserSessions ends every session of the user, for callers without an Auth (the CLI).
+func DestroyUserSessions(ctx context.Context, sessions *kvstore.Store, userID int) error {
+	// The TTL only matters for writes; destroying never writes.
+	return kvstore.NewSessionStore(sessions, 0).DestroyUserSessions(ctx, userID)
 }
 
 func newOIDCClient(dialControl ssrf.Control) *http.Client {

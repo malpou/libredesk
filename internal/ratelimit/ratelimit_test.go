@@ -5,34 +5,62 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	"github.com/abhinavxd/libredesk/internal/kvstore/kvtest"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/logf"
 )
 
-func TestUnavailableLimiterLogsFailOpen(t *testing.T) {
-	server := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { client.Close() })
+func request() *fasthttp.RequestCtx {
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.Set("X-Real-Ip", "2001:db8::1")
+	return ctx
+}
+
+func testLogger(buf *bytes.Buffer) *logf.Logger {
+	lo := logf.New(logf.Opts{Writer: buf})
+	return &lo
+}
+
+func TestCheckLimitsPerWindow(t *testing.T) {
 	var logs bytes.Buffer
-	lo := logf.New(logf.Opts{Writer: &logs})
-	limiter := New(client, &lo)
-	limiter.AddRule(Rule{Name: "auth", Enabled: true, RequestsPerMinute: 1})
-	var request fasthttp.RequestCtx
-	request.Init(&fasthttp.Request{}, nil /** remoteAddr **/, nil /** logger **/)
-	if err := limiter.Check(&request, "auth"); err != nil {
-		t.Fatal(err)
+	l := New(kvtest.Bucket(t, "ratelimit"), testLogger(&logs))
+	l.AddRule(Rule{Name: "auth", Enabled: true, RequestsPerMinute: 3})
+
+	for i := range 3 {
+		ctx := request()
+		if err := l.Check(ctx, "auth"); err != nil {
+			t.Fatalf("request %d limited: %v", i, err)
+		}
+		if got := string(ctx.Response.Header.Peek("X-RateLimit-Limit")); got != "3" {
+			t.Errorf("X-RateLimit-Limit = %q, want 3", got)
+		}
 	}
 	if logs.Len() != 0 {
-		t.Fatal("allowed request produced a log")
+		t.Fatalf("allowed requests produced a log: %s", logs.String())
 	}
-	if err := limiter.Check(&request, "auth"); err == nil {
-		t.Fatal("rate limit was not enforced")
+	ctx := request()
+	if err := l.Check(ctx, "auth"); err == nil {
+		t.Fatal("fourth request in the window must be limited")
 	}
-	server.SetError("storage unavailable")
-	if err := limiter.Check(&request, "auth"); err != nil {
-		t.Fatalf("existing fail open policy changed: %v", err)
+	if ctx.Response.StatusCode() != fasthttp.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", ctx.Response.StatusCode())
+	}
+	if got := string(ctx.Response.Header.Peek("Retry-After")); got != "60" {
+		t.Errorf("Retry-After = %q, want 60", got)
+	}
+}
+
+func TestCheckFailsOpenWhenStoreIsDown(t *testing.T) {
+	var logs bytes.Buffer
+	srv := kvtest.Start(t)
+	l := New(srv.Bucket("ratelimit"), testLogger(&logs))
+	l.AddRule(Rule{Name: "auth", Enabled: true, RequestsPerMinute: 1})
+	srv.Shutdown()
+
+	for range 3 {
+		if err := l.Check(request(), "auth"); err != nil {
+			t.Fatalf("a store outage must not rate limit requests: %v", err)
+		}
 	}
 	if !strings.Contains(logs.String(), "level=warn") || !strings.Contains(logs.String(), "rule=auth") {
 		t.Fatalf("missing storage failure warning: %s", logs.String())

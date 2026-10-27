@@ -7,14 +7,18 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	amodels "github.com/abhinavxd/libredesk/internal/auth/models"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
+	"github.com/abhinavxd/libredesk/internal/kvstore/kvtest"
 	"github.com/abhinavxd/libredesk/internal/testutil"
-	"github.com/alicebob/miniredis/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/redis/go-redis/v9"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
 	"github.com/zerodha/logf"
@@ -26,39 +30,8 @@ type testOIDCKeys struct {
 	payload []byte
 }
 
-type sessionRedisHook struct {
-	process  func(redis.Cmder) error
-	pipeline func([]redis.Cmder) error
-}
-
 func (k testOIDCKeys) VerifySignature(context.Context, string) ([]byte, error) {
 	return k.payload, nil
-}
-
-func (h sessionRedisHook) DialHook(next redis.DialHook) redis.DialHook {
-	return next
-}
-
-func (h sessionRedisHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
-	return func(ctx context.Context, cmd redis.Cmder) error {
-		if h.process != nil {
-			if err := h.process(cmd); err != nil {
-				return err
-			}
-		}
-		return next(ctx, cmd)
-	}
-}
-
-func (h sessionRedisHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return func(ctx context.Context, cmds []redis.Cmder) error {
-		if h.pipeline != nil {
-			if err := h.pipeline(cmds); err != nil {
-				return err
-			}
-		}
-		return next(ctx, cmds)
-	}
 }
 
 func TestOIDCRejectsBlankEmail(t *testing.T) {
@@ -131,23 +104,22 @@ func TestRemovedProviderStaysDisabledWhenReloadFails(t *testing.T) {
 }
 
 func TestSessionsRejectRevokedAndLegacyCookies(t *testing.T) {
-	a, rd, _ := sessionAuthForTest(t, time.Hour)
+	a, st, _ := sessionAuthForTest(t, time.Hour)
 	first := saveTestSession(t, a, 1)
 	second := saveTestSession(t, a, 1)
 	other := saveTestSession(t, a, 2)
 	requireSession(t, a, first, 1)
 	requireSession(t, a, second, 1)
-	if err := rd.SAdd(t.Context(), userSessionKeyPrefix+"1", first).Err(); err != nil {
-		t.Fatal(err)
-	}
 	if err := a.DestroyUserSessions(t.Context(), 1); err != nil {
 		t.Fatal(err)
 	}
 	requireSession(t, a, first, 0 /** wantID **/)
 	requireSession(t, a, second, 0 /** wantID **/)
 	requireSession(t, a, other, 2)
-	if n, err := rd.Exists(t.Context(), userSessionKeyPrefix+"1", sessionKeyPrefix+first, sessionKeyPrefix+second).Result(); err != nil || n != 0 {
-		t.Fatalf("revoked sessions remain: count=%d err=%v", n, err)
+	for _, key := range []string{userIndexKey(1), first, second} {
+		if _, err := st.store.Get(t.Context(), key); !errors.Is(err, kvstore.ErrNotFound) {
+			t.Fatalf("revoked key %q remains: err=%v", key, err)
+		}
 	}
 	if err := a.DestroyUserSessions(t.Context(), 1); err != nil {
 		t.Fatalf("repeated revocation: %v", err)
@@ -166,7 +138,7 @@ func TestSessionsRejectRevokedAndLegacyCookies(t *testing.T) {
 }
 
 func TestSessionLogoutPreservesOtherLogins(t *testing.T) {
-	a, rd, _ := sessionAuthForTest(t, time.Hour)
+	a, st, _ := sessionAuthForTest(t, time.Hour)
 	first := saveTestSession(t, a, 1)
 	second := saveTestSession(t, a, 1)
 	if err := a.DestroySession(sessionRequest(first)); err != nil {
@@ -174,9 +146,8 @@ func TestSessionLogoutPreservesOtherLogins(t *testing.T) {
 	}
 	requireSession(t, a, first, 0 /** wantID **/)
 	requireSession(t, a, second, 1)
-	ids, err := rd.SMembers(t.Context(), userSessionKeyPrefix+"1").Result()
-	if err != nil || len(ids) != 1 || ids[0] != second {
-		t.Fatalf("remaining sessions = %v, err = %v", ids, err)
+	if ids := indexedSessions(t, st, 1); len(ids) != 1 || ids[0] != second {
+		t.Fatalf("remaining sessions = %v", ids)
 	}
 	if err := a.DestroySession(sessionRequest(first)); err != nil {
 		t.Fatalf("repeated logout: %v", err)
@@ -184,14 +155,14 @@ func TestSessionLogoutPreservesOtherLogins(t *testing.T) {
 }
 
 func TestSessionIndexExpiresAfterLastLogin(t *testing.T) {
-	a, rd, mr := sessionAuthForTest(t, time.Hour)
+	a, st, clock := sessionAuthForTest(t, time.Hour)
 	first := saveTestSession(t, a, 1)
-	mr.FastForward(30 * time.Minute)
+	clock.Advance(30 * time.Minute)
 	second := saveTestSession(t, a, 1)
-	if ttl := mr.TTL(userSessionKeyPrefix + "1"); ttl != time.Hour {
+	if ttl := indexTTL(t, st, clock, 1); ttl != time.Hour {
 		t.Fatalf("index TTL = %v, want %v", ttl, time.Hour)
 	}
-	mr.FastForward(31 * time.Minute)
+	clock.Advance(31 * time.Minute)
 	requireSession(t, a, first, 0 /** wantID **/)
 	requireSession(t, a, second, 1)
 	if err := a.DestroyUserSessions(t.Context(), 1); err != nil {
@@ -200,23 +171,23 @@ func TestSessionIndexExpiresAfterLastLogin(t *testing.T) {
 	requireSession(t, a, second, 0 /** wantID **/)
 
 	last := saveTestSession(t, a, 1)
-	mr.FastForward(time.Hour)
+	clock.Advance(time.Hour)
 	requireSession(t, a, last, 0 /** wantID **/)
-	if n, err := rd.Exists(t.Context(), userSessionKeyPrefix+"1").Result(); err != nil || n != 0 {
-		t.Fatalf("expired index remains: count=%d err=%v", n, err)
+	if _, err := st.store.Get(t.Context(), userIndexKey(1)); !errors.Is(err, kvstore.ErrNotFound) {
+		t.Fatalf("expired index remains: err=%v", err)
 	}
 }
 
 func TestSessionIndexPreservesLongerSessionLifetime(t *testing.T) {
-	a, rd, mr := sessionAuthForTest(t, time.Hour)
+	a, st, clock := sessionAuthForTest(t, time.Hour)
 	first := saveTestSession(t, a, 1)
-	mr.FastForward(10 * time.Minute)
-	shorter, err := New(Config{SessionLifetime: time.Minute}, a.i18n, rd, a.logger, nil /** dialControl **/)
+	clock.Advance(10 * time.Minute)
+	shorter, err := New(Config{SessionLifetime: time.Minute}, a.i18n, st.store, a.logger, nil /** dialControl **/)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second := saveTestSession(t, shorter, 1)
-	if ttl := mr.TTL(userSessionKeyPrefix + "1"); ttl != 50*time.Minute {
+	if ttl := indexTTL(t, st, clock, 1); ttl != 50*time.Minute {
 		t.Fatalf("index expired before older sessions: TTL=%v", ttl)
 	}
 	if err := shorter.DestroyUserSessions(t.Context(), 1); err != nil {
@@ -227,8 +198,8 @@ func TestSessionIndexPreservesLongerSessionLifetime(t *testing.T) {
 }
 
 func TestSessionIndexFailureDoesNotAuthenticate(t *testing.T) {
-	a, rd, _ := sessionAuthForTest(t, time.Hour)
-	if err := rd.Set(t.Context(), userSessionKeyPrefix+"1", "wrong type", 0 /** expiration **/).Err(); err != nil {
+	a, st, _ := sessionAuthForTest(t, time.Hour)
+	if err := st.store.Put(t.Context(), userIndexKey(1), []byte("wrong type"), 0 /** ttl **/); err != nil {
 		t.Fatal(err)
 	}
 	r := sessionRequest("" /** cookie **/)
@@ -247,37 +218,35 @@ func TestSessionIndexFailureDoesNotAuthenticate(t *testing.T) {
 }
 
 func TestSessionRevocationFailurePreservesIndex(t *testing.T) {
-	a, rd, _ := sessionAuthForTest(t, time.Hour)
+	a, st, _ := sessionAuthForTest(t, time.Hour)
 	cookie := saveTestSession(t, a, 1)
-	rd.AddHook(sessionRedisHook{process: func(cmd redis.Cmder) error {
-		if cmd.Name() == "del" {
-			return errors.New("redis unavailable")
-		}
-		return nil
-	}})
+	st.kv.setDelete(func(string) error { return errors.New("kv unavailable") })
 	if err := a.DestroyUserSessions(t.Context(), 1); err == nil {
 		t.Fatal("revocation failure reported success")
 	}
+	st.kv.setDelete(nil)
 	requireSession(t, a, cookie, 1)
-	if n, err := rd.SCard(t.Context(), userSessionKeyPrefix+"1").Result(); err != nil || n != 1 {
-		t.Fatalf("failed revocation lost its index: count=%d err=%v", n, err)
+	if ids := indexedSessions(t, st, 1); len(ids) != 1 {
+		t.Fatalf("failed revocation lost its index: %v", ids)
 	}
 }
 
 func TestSessionRevocationWaitsForRegistration(t *testing.T) {
-	a, rd, _ := sessionAuthForTest(t, time.Hour)
+	a, st, _ := sessionAuthForTest(t, time.Hour)
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	defer close(release)
-	rd.AddHook(sessionRedisHook{pipeline: func(cmds []redis.Cmder) error {
-		for _, cmd := range cmds {
-			if cmd.Name() == "hmset" {
+	var once sync.Once
+	// SetMulti writes the session fields with an Update of the session key; hold it there.
+	st.kv.setUpdate(func(key string) error {
+		if key != userIndexKey(1) {
+			once.Do(func() {
 				close(entered)
 				<-release
-			}
+			})
 		}
 		return nil
-	}})
+	})
 	r := sessionRequest("" /** cookie **/)
 	loginDone := make(chan error, 1)
 	go func() { loginDone <- a.SaveSession(amodels.User{ID: 1}, r) }()
@@ -303,15 +272,15 @@ func TestSessionRevocationWaitsForRegistration(t *testing.T) {
 	requireSession(t, a, string(cookie.Value()), 0 /** wantID **/)
 }
 
-func TestSessionValidationUsesOneRedisRead(t *testing.T) {
-	a, _, mr := sessionAuthForTest(t, 0 /** lifetime **/)
+func TestSessionValidationUsesOneKVRead(t *testing.T) {
+	a, st, clock := sessionAuthForTest(t, 0 /** lifetime **/)
 	cookie := saveTestSession(t, a, 1)
-	before := mr.CommandCount()
+	before := st.kv.ops.Load()
 	requireSession(t, a, cookie, 1)
-	if count := mr.CommandCount() - before; count != 1 {
-		t.Fatalf("validation used %d Redis commands, want 1", count)
+	if count := st.kv.ops.Load() - before; count != 1 {
+		t.Fatalf("validation used %d KV operations, want 1", count)
 	}
-	if ttl := mr.TTL(userSessionKeyPrefix + "1"); ttl != defaultSessionLifetime {
+	if ttl := indexTTL(t, st, clock, 1); ttl != defaultSessionLifetime {
 		t.Fatalf("default index TTL = %v", ttl)
 	}
 }
@@ -319,7 +288,7 @@ func TestSessionValidationUsesOneRedisRead(t *testing.T) {
 func TestSessionValuesPreserveLoginAndReplaceInvalidCookies(t *testing.T) {
 	for _, cookieType := range []string{"missing", "unknown", "expired", "authenticated"} {
 		t.Run(cookieType, func(t *testing.T) {
-			a, _, mr := sessionAuthForTest(t, time.Hour)
+			a, _, clock := sessionAuthForTest(t, time.Hour)
 			cookie := ""
 			switch cookieType {
 			case "unknown":
@@ -327,7 +296,7 @@ func TestSessionValuesPreserveLoginAndReplaceInvalidCookies(t *testing.T) {
 			case "expired", "authenticated":
 				cookie = saveTestSession(t, a, 1)
 				if cookieType == "expired" {
-					mr.FastForward(2 * time.Hour)
+					clock.Advance(2 * time.Hour)
 				}
 			}
 			r := sessionRequest(cookie)
@@ -357,29 +326,120 @@ func TestSessionValuesPreserveLoginAndReplaceInvalidCookies(t *testing.T) {
 }
 
 func TestSessionValidationDoesNotCreateAnonymousSessions(t *testing.T) {
-	a, _, mr := sessionAuthForTest(t, time.Hour)
+	a, st, _ := sessionAuthForTest(t, time.Hour)
 	for _, cookie := range []string{"", "unknown-session"} {
 		r := sessionRequest(cookie)
 		if _, err := a.ValidateSession(r); !errors.Is(err, simplesessions.ErrInvalidSession) {
 			t.Fatalf("invalid session accepted: %v", err)
 		}
-		if len(mr.Keys()) != 0 || len(r.RequestCtx.Response.Header.Peek("Set-Cookie")) != 0 {
+		if st.kv.writes.Load() != 0 || len(r.RequestCtx.Response.Header.Peek("Set-Cookie")) != 0 {
 			t.Fatal("invalid session validation created an anonymous session")
 		}
 	}
 }
 
-func sessionAuthForTest(t *testing.T, lifetime time.Duration) (*Auth, *redis.Client, *miniredis.Miniredis) {
+// hookKV counts operations on a bucket and lets a test fail or hold them.
+type hookKV struct {
+	jetstream.KeyValue
+	ops, writes atomic.Int64
+	mu          sync.Mutex
+	update, del func(key string) error
+}
+
+func (h *hookKV) setUpdate(fn func(string) error) { h.mu.Lock(); h.update = fn; h.mu.Unlock() }
+func (h *hookKV) setDelete(fn func(string) error) { h.mu.Lock(); h.del = fn; h.mu.Unlock() }
+
+func (h *hookKV) hook(fn *func(string) error, key string) error {
+	h.mu.Lock()
+	f := *fn
+	h.mu.Unlock()
+	if f != nil {
+		return f(key)
+	}
+	return nil
+}
+
+func (h *hookKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	h.ops.Add(1)
+	return h.KeyValue.Get(ctx, key)
+}
+
+func (h *hookKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	h.ops.Add(1)
+	h.writes.Add(1)
+	return h.KeyValue.Put(ctx, key, value)
+}
+
+func (h *hookKV) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
+	h.ops.Add(1)
+	h.writes.Add(1)
+	return h.KeyValue.Create(ctx, key, value, opts...)
+}
+
+func (h *hookKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	h.ops.Add(1)
+	h.writes.Add(1)
+	if err := h.hook(&h.update, key); err != nil {
+		return 0, err
+	}
+	return h.KeyValue.Update(ctx, key, value, revision)
+}
+
+func (h *hookKV) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
+	h.ops.Add(1)
+	h.writes.Add(1)
+	if err := h.hook(&h.del, key); err != nil {
+		return err
+	}
+	return h.KeyValue.Delete(ctx, key, opts...)
+}
+
+type sessionTestStore struct {
+	kv    *hookKV
+	store *kvstore.Store
+}
+
+func userIndexKey(userID int) string { return kvstore.Key("user_sessions", strconv.Itoa(userID)) }
+
+func indexedSessions(t *testing.T, st sessionTestStore, userID int) []string {
 	t.Helper()
-	mr := miniredis.RunT(t)
-	rd := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { rd.Close() })
-	lo := logf.New(logf.Opts{})
-	a, err := New(Config{SessionLifetime: lifetime}, testutil.NewI18n(t), rd, &lo, nil /** dialControl **/)
+	e, err := st.store.Get(t.Context(), userIndexKey(userID))
+	if err != nil {
+		t.Fatalf("reading session index: %v", err)
+	}
+	var ids []string
+	if err := json.Unmarshal(e.Value, &ids); err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+func indexTTL(t *testing.T, st sessionTestStore, clock *kvtest.Clock, userID int) time.Duration {
+	t.Helper()
+	e, err := st.store.Get(t.Context(), userIndexKey(userID))
+	if err != nil {
+		t.Fatalf("reading session index: %v", err)
+	}
+	return e.Expires.Sub(clock.Now())
+}
+
+func sessionAuthForTest(t *testing.T, lifetime time.Duration) (*Auth, sessionTestStore, *kvtest.Clock) {
+	t.Helper()
+	srv := kvtest.Start(t)
+	raw, err := srv.JS.CreateKeyValue(t.Context(), jetstream.KeyValueConfig{Bucket: "sessions"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return a, rd, mr
+	kv := &hookKV{KeyValue: raw}
+	st := kvstore.New(kv)
+	clock := kvtest.NewClock()
+	st.SetClock(clock.Now)
+	lo := logf.New(logf.Opts{})
+	a, err := New(Config{SessionLifetime: lifetime}, testutil.NewI18n(t), st, &lo, nil /** dialControl **/)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, sessionTestStore{kv: kv, store: st}, clock
 }
 
 func sessionRequest(cookie string) *fastglue.Request {

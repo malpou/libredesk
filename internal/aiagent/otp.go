@@ -3,22 +3,19 @@ package aiagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
-	"github.com/redis/go-redis/v9"
 )
 
 const (
-	otpPendingKeyPrefix  = "ai:otp:pending:"
-	otpVerifiedKeyPrefix = "ai:otp:verified:"
-	otpSendsKeyPrefix    = "ai:otp:sends:"
-
 	otpPendingTTL  = 10 * time.Minute
 	otpVerifiedTTL = 30 * time.Minute
 
@@ -29,45 +26,6 @@ const (
 	otpMaxConvSends = 6
 )
 
-// checkOTPScript matches the pending code and, on match, stores the attested email as the verified
-// value, all in one step. Returns 1 on match, 0 on miss/expiry, -1 on corrupt data (key cleared).
-var checkOTPScript = redis.NewScript(`
-local raw = redis.call('GET', KEYS[1])
-if not raw then
-	return 0
-end
-local ok, p = pcall(cjson.decode, raw)
-if not ok or type(p) ~= 'table' then
-	redis.call('DEL', KEYS[1])
-	return -1
-end
-if type(p.email) ~= 'string' or p.email == '' then
-	redis.call('DEL', KEYS[1])
-	return 0
-end
-if p.code == ARGV[1] then
-	redis.call('DEL', KEYS[1])
-	redis.call('SET', KEYS[2], p.email, 'EX', ARGV[3])
-	return 1
-end
-p.attempts = (p.attempts or 0) + 1
-if p.attempts >= tonumber(ARGV[2]) then
-	redis.call('DEL', KEYS[1])
-else
-	redis.call('SET', KEYS[1], cjson.encode(p), 'KEEPTTL')
-end
-return 0
-`)
-
-// incrOTPSendsScript increments the send counter and sets its TTL on first increment.
-var incrOTPSendsScript = redis.NewScript(`
-local n = redis.call('INCR', KEYS[1])
-if n == 1 then
-	redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return n
-`)
-
 // pendingOTP is the JSON stored at otpPendingKeyPrefix while a code awaits entry.
 type pendingOTP struct {
 	Code     string `json:"code"`
@@ -75,8 +33,10 @@ type pendingOTP struct {
 	Attempts int    `json:"attempts"`
 }
 
-func otpPendingKey(convUUID string) string  { return otpPendingKeyPrefix + convUUID }
-func otpVerifiedKey(convUUID string) string { return otpVerifiedKeyPrefix + convUUID }
+// Pending codes live in the otp pending bucket; verified emails and send counters in the otp
+// state bucket.
+func otpPendingKey(convUUID string) string  { return kvstore.Key("pending", convUUID) }
+func otpVerifiedKey(convUUID string) string { return kvstore.Key("verified", convUUID) }
 
 func normalizeOTPEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
@@ -84,10 +44,10 @@ func normalizeOTPEmail(email string) string {
 
 // otpSendsKey scopes the send budget to one address so correcting a mistyped email gets a fresh one.
 func otpSendsKey(convUUID, email string) string {
-	return otpSendsKeyPrefix + convUUID + ":" + normalizeOTPEmail(email)
+	return kvstore.Key("sends", convUUID, normalizeOTPEmail(email))
 }
 
-func otpConvSendsKey(convUUID string) string { return otpSendsKeyPrefix + convUUID }
+func otpConvSendsKey(convUUID string) string { return kvstore.Key("sends", convUUID) }
 
 // isContactVerified reports whether the customer on this conversation has proven their identity: a
 // JWT livechat contact is trusted by login, everyone else only within an OTP verification window.
@@ -108,14 +68,14 @@ func (m *Manager) isConversationVerified(convUUID, contactEmail string) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	v, err := m.redis.Get(ctx, otpVerifiedKey(convUUID)).Result()
+	e, err := m.otpState.Get(ctx, otpVerifiedKey(convUUID))
 	if err != nil {
-		if err != redis.Nil {
+		if !errors.Is(err, kvstore.ErrNotFound) {
 			m.lo.Error("error reading otp verified key", "conversation_uuid", convUUID, "error", err)
 		}
 		return false
 	}
-	return v == email
+	return string(e.Value) == email
 }
 
 // clearConversationVerified drops the verified flag and any pending code so a changed email must be
@@ -123,29 +83,37 @@ func (m *Manager) isConversationVerified(convUUID, contactEmail string) bool {
 func (m *Manager) clearConversationVerified(convUUID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return m.redis.Del(ctx, otpVerifiedKey(convUUID), otpPendingKey(convUUID)).Err()
+	if err := m.otpState.Delete(ctx, otpVerifiedKey(convUUID)); err != nil {
+		return err
+	}
+	return m.otpPending.Delete(ctx, otpPendingKey(convUUID))
 }
 
 // otpSendCapReached reports whether this address or the conversation as a whole is out of sends.
 func (m *Manager) otpSendCapReached(convUUID, email string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	counts, err := m.redis.MGet(ctx, otpSendsKey(convUUID, email), otpConvSendsKey(convUUID)).Result()
+	perAddress, err := m.otpCount(ctx, otpSendsKey(convUUID, email))
 	if err != nil {
 		return false, err
 	}
-	return otpCount(counts[0]) >= otpMaxSends || otpCount(counts[1]) >= otpMaxConvSends, nil
+	perConv, err := m.otpCount(ctx, otpConvSendsKey(convUUID))
+	if err != nil {
+		return false, err
+	}
+	return perAddress >= otpMaxSends || perConv >= otpMaxConvSends, nil
 }
 
-// incrOTPSends records a code that was actually emailed against both the address and conversation budgets.
+// incrOTPSends records a code that was actually emailed against both the address and conversation
+// budgets. Each budget's window starts at its first send.
 func (m *Manager) incrOTPSends(convUUID, email string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	ttl := int(otpVerifiedTTL.Seconds())
-	if err := incrOTPSendsScript.Run(ctx, m.redis, []string{otpSendsKey(convUUID, email)}, ttl).Err(); err != nil {
+	if _, err := m.otpState.Incr(ctx, otpSendsKey(convUUID, email), otpVerifiedTTL); err != nil {
 		return err
 	}
-	return incrOTPSendsScript.Run(ctx, m.redis, []string{otpConvSendsKey(convUUID)}, ttl).Err()
+	_, err := m.otpState.Incr(ctx, otpConvSendsKey(convUUID), otpVerifiedTTL)
+	return err
 }
 
 func (m *Manager) storePendingOTP(convUUID, code, email string) error {
@@ -155,26 +123,73 @@ func (m *Manager) storePendingOTP(convUUID, code, email string) error {
 	if err != nil {
 		return err
 	}
-	return m.redis.Set(ctx, otpPendingKey(convUUID), b, otpPendingTTL).Err()
+	return m.otpPending.Put(ctx, otpPendingKey(convUUID), b, otpPendingTTL)
 }
 
 // checkPendingOTP matches code against the pending code and, on match, marks the conversation
-// verified atomically; the pending key is cleared on match, expiry, or the attempt cap.
+// verified. Every outcome is a compare-and-swap on the pending revision that was read, so
+// concurrent checks each consume exactly one attempt and only one of them can win a match.
+// The pending key is cleared on match, corrupt data, the attempt cap or a legacy record.
 func (m *Manager) checkPendingOTP(convUUID, code string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	res, err := checkOTPScript.Run(ctx, m.redis,
-		[]string{otpPendingKey(convUUID), otpVerifiedKey(convUUID)},
-		code, otpMaxAttempts, int(otpVerifiedTTL.Seconds())).Int()
-	if err != nil {
-		return false, err
-	}
-	switch res {
-	case 1:
-		return true, nil
-	case -1:
-		return false, fmt.Errorf("corrupt pending otp for conversation %s", convUUID)
-	default:
+	key := otpPendingKey(convUUID)
+
+	for {
+		e, err := m.otpPending.Get(ctx, key)
+		if errors.Is(err, kvstore.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+
+		var p pendingOTP
+		if err := json.Unmarshal(e.Value, &p); err != nil {
+			if err := m.otpPending.DeleteRevision(ctx, key, e.Revision); errors.Is(err, kvstore.ErrConflict) {
+				continue
+			}
+			return false, fmt.Errorf("corrupt pending otp for conversation %s", convUUID)
+		}
+		if p.Email == "" {
+			if err := m.otpPending.DeleteRevision(ctx, key, e.Revision); errors.Is(err, kvstore.ErrConflict) {
+				continue
+			} else if err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+
+		if p.Code == code {
+			// Consuming the pending revision is what makes the code single-use.
+			if err := m.otpPending.DeleteRevision(ctx, key, e.Revision); errors.Is(err, kvstore.ErrConflict) {
+				continue
+			} else if err != nil {
+				return false, err
+			}
+			if err := m.otpState.Put(ctx, otpVerifiedKey(convUUID), []byte(p.Email), otpVerifiedTTL); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+
+		p.Attempts++
+		if p.Attempts >= otpMaxAttempts {
+			err = m.otpPending.DeleteRevision(ctx, key, e.Revision)
+		} else {
+			var b []byte
+			if b, err = json.Marshal(p); err != nil {
+				return false, err
+			}
+			// Keep the original expiry: a wrong attempt must not extend the code's lifetime.
+			_, err = m.otpPending.Update(ctx, key, b, e.Expires, e.Revision)
+		}
+		if errors.Is(err, kvstore.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 }
@@ -184,15 +199,18 @@ func generateOTP() (string, error) {
 	return stringutil.RandomNumeric(6)
 }
 
-// otpCount reads one counter out of an MGet result, treating a missing or unparseable key as zero.
-func otpCount(v any) int64 {
-	s, ok := v.(string)
-	if !ok {
-		return 0
+// otpCount reads one send counter, treating a missing or unparseable value as zero.
+func (m *Manager) otpCount(ctx context.Context, key string) (int64, error) {
+	e, err := m.otpState.Get(ctx, key)
+	if errors.Is(err, kvstore.ErrNotFound) {
+		return 0, nil
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return n
+	n, err := strconv.ParseInt(string(e.Value), 10, 64)
+	if err != nil {
+		return 0, nil
+	}
+	return n, nil
 }

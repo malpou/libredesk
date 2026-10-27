@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/inbox"
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/email/oauth"
 	imodels "github.com/abhinavxd/libredesk/internal/inbox/models"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
@@ -20,6 +23,9 @@ import (
 )
 
 const (
+	// oauthStateTTL is how long an inbox OAuth flow has to come back to the callback.
+	oauthStateTTL = 15 * time.Minute
+
 	FlowTypeNewInbox  = "new_inbox"
 	FlowTypeReconnect = "reconnect"
 )
@@ -71,15 +77,14 @@ func handleOAuthAuthorize(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
 	}
 
-	// Store OAuth data in Redis with 15 min expiry
-	redisKey := "inbox_oauth:" + state
-	oauthData := map[string]any{
+	// Store OAuth data for the callback; it expires after oauthStateTTL.
+	oauthData := map[string]string{
 		"provider":      provider,
 		"redirect_uri":  redirectURI,
 		"client_id":     req.ClientID,
 		"client_secret": req.ClientSecret,
 		"flow_type":     req.FlowType,
-		"inbox_id":      req.InboxID,
+		"inbox_id":      strconv.Itoa(req.InboxID),
 	}
 
 	// Add tenant ID for Microsoft if provided
@@ -87,14 +92,13 @@ func handleOAuthAuthorize(r *fastglue.Request) error {
 		oauthData["tenant_id"] = req.TenantID
 	}
 
-	if err := app.redis.HSet(ctx, redisKey, oauthData).Err(); err != nil {
-		app.lo.Error("Failed to store OAuth state in Redis", "error", err)
+	b, err := json.Marshal(oauthData)
+	if err != nil {
+		app.lo.Error("Failed to encode OAuth state", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.Ts("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
 	}
-
-	// Set 15 min expiry (auto-cleanup)
-	if err := app.redis.Expire(ctx, redisKey, 15*time.Minute).Err(); err != nil {
-		app.lo.Error("Failed to set expiry for OAuth state in Redis", "error", err)
+	if err := app.kv.oauthState.Put(ctx, kvstore.Key(state), b, oauthStateTTL); err != nil {
+		app.lo.Error("Failed to store OAuth state", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.Ts("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
 	}
 
@@ -135,24 +139,28 @@ func handleOAuthCallback(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, app.i18n.Ts("globals.messages.somethingWentWrong"), nil, envelope.InputError)
 	}
 
-	// Retrieve OAuth data from Redis
-	redisKey := "inbox_oauth:" + state
-	oauthData, err := app.redis.HGetAll(ctx, redisKey).Result()
-	if err != nil {
+	// Retrieve OAuth data and consume it by revision, so a state is good for exactly one callback.
+	stateKey := kvstore.Key(state)
+	e, err := app.kv.oauthState.Get(ctx, stateKey)
+	if err == nil {
+		err = app.kv.oauthState.DeleteRevision(ctx, stateKey, e.Revision)
+	}
+	var oauthData map[string]string
+	if err == nil {
+		err = json.Unmarshal(e.Value, &oauthData)
+	}
+	if err != nil && !errors.Is(err, kvstore.ErrNotFound) && !errors.Is(err, kvstore.ErrConflict) {
 		app.lo.Error("error loading inbox OAuth state", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError,
 			app.i18n.Ts("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
 	}
-	if len(oauthData) == 0 {
+	if err != nil || len(oauthData) == 0 {
 		app.lo.Warn("inbox OAuth callback rejected: state is invalid or expired")
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest,
 			app.i18n.Ts("globals.messages.somethingWentWrong"), nil, envelope.InputError)
 	}
 
-	// Delete key after retrieval (one-time use)
-	app.redis.Del(ctx, redisKey)
-
-	// Extract values from Redis hash
+	// Extract the stored values
 	storedProvider := oauthData["provider"]
 	redirectURI := oauthData["redirect_uri"]
 	clientID := oauthData["client_id"]

@@ -70,13 +70,13 @@ func install(ctx context.Context, db *sqlx.DB, fs stuffbin.FileSystem, idempoten
 
 // setSystemUserPass prompts for pass and sets system user password.
 func setSystemUserPass(ctx context.Context, db *sqlx.DB) {
-	rd := initRedis()
-	defer rd.Close()
+	kv := initKV()
+	defer kv.nc.Close()
 	id, err := user.ChangeSystemUserPassword(ctx, db)
 	if err != nil {
 		log.Fatalf("error changing system user password: %v", err)
 	}
-	if err := auth_.DestroyUserSessions(ctx, rd, id); err != nil {
+	if err := auth_.DestroyUserSessions(ctx, kv.sessions, id); err != nil {
 		log.Fatalf("error destroying system user sessions: %v", err)
 	}
 	fmt.Println("password updated successfully. Login with email 'System' and the new password.")

@@ -36,6 +36,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat/proactive"
 	whatsappChannel "github.com/abhinavxd/libredesk/internal/inbox/channel/whatsapp"
 	imodels "github.com/abhinavxd/libredesk/internal/inbox/models"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/macro"
 	"github.com/abhinavxd/libredesk/internal/media"
 	fs "github.com/abhinavxd/libredesk/internal/media/stores/localfs"
@@ -72,10 +73,10 @@ import (
 	"github.com/knadh/koanf/v2"
 	"github.com/knadh/stuffbin"
 	_ "github.com/lib/pq"
-	"github.com/redis/go-redis/v9"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	flag "github.com/spf13/pflag"
 	"github.com/volatiletech/null/v9"
-	goredis "github.com/zerodha/fastcache/stores/goredis/v9"
 	"github.com/zerodha/fastcache/v4"
 	"github.com/zerodha/logf"
 )
@@ -929,7 +930,7 @@ func initSSRFControl() ssrf.Control {
 }
 
 // initAuth initializes the authentication manager.
-func initAuth(o *oidc.Manager, rd *redis.Client, i18n *i18n.I18n, dialControl ssrf.Control) *auth_.Auth {
+func initAuth(o *oidc.Manager, sessions *kvstore.Store, i18n *i18n.I18n, dialControl ssrf.Control) *auth_.Auth {
 	lo := initLogger("auth")
 
 	providers, err := buildProviders(o)
@@ -939,7 +940,7 @@ func initAuth(o *oidc.Manager, rd *redis.Client, i18n *i18n.I18n, dialControl ss
 
 	secure := !ko.Bool("app.server.disable_secure_cookies")
 	sessionLifetime := ko.Duration("app.server.session_lifetime")
-	auth, err := auth_.New(auth_.Config{Providers: providers, SecureCookies: secure, SessionLifetime: sessionLifetime}, i18n, rd, lo, dialControl)
+	auth, err := auth_.New(auth_.Config{Providers: providers, SecureCookies: secure, SessionLifetime: sessionLifetime}, i18n, sessions, lo, dialControl)
 	if err != nil {
 		log.Fatalf("error initializing auth: %v", err)
 	}
@@ -1018,28 +1019,66 @@ func initI18n(fs stuffbin.FileSystem) *i18n.I18n {
 	return i18n
 }
 
-// initRedis inits redis DB.
-func initRedis() *redis.Client {
-	// Load options from redis URL if set.
-	redisURL := ko.String("redis.url")
-	if redisURL != "" {
-		options, err := redis.ParseURL(redisURL)
-		if err != nil {
-			log.Fatalf("error parsing redis url: %v", err)
-		}
-		return redis.NewClient(options)
-	}
-	// Load from individual config options.
-	return redis.NewClient(&redis.Options{
-		Addr:     ko.MustString("redis.address"),
-		Username: ko.String("redis.user"),
-		Password: ko.String("redis.password"),
-		DB:       ko.Int("redis.db"),
-	})
+// kvStores holds the NATS KV buckets libredesk keeps sessions, caches and other short-lived
+// state in.
+type kvStores struct {
+	nc             *nats.Conn
+	sessions       *kvstore.Store
+	widgetSessions *kvstore.Store
+	hcCache        *kvstore.Store
+	hcFeedback     *kvstore.Store
+	oauthState     *kvstore.Store
+	pageVisits     *kvstore.Store
+	otpPending     *kvstore.Store
+	otpState       *kvstore.Store
+	rateLimit      *kvstore.Store
 }
 
-func initFastCache(rdb *redis.Client) *fastcache.FastCache {
-	return fastcache.New(goredis.New(goredis.Config{Prefix: fastCachePrefix}, rdb))
+// initKV connects to NATS and binds every KV bucket. Buckets are provisioned outside libredesk
+// (with their replication and max age), so a missing bucket stops startup instead of being created.
+func initKV() *kvStores {
+	opts := []nats.Option{
+		nats.Name("libredesk"),
+		nats.MaxReconnects(-1),
+	}
+	if f := ko.String("nats.creds_file"); f != "" {
+		opts = append(opts, nats.UserCredentials(f))
+	} else if u := ko.String("nats.user"); u != "" {
+		opts = append(opts, nats.UserInfo(u, ko.String("nats.password")))
+	}
+	nc, err := nats.Connect(cmp.Or(ko.String("nats.url"), nats.DefaultURL), opts...)
+	if err != nil {
+		log.Fatalf("error connecting to nats: %v", err)
+	}
+	js, err := jetstream.New(nc)
+	if err != nil {
+		log.Fatalf("error initializing jetstream: %v", err)
+	}
+
+	open := func(name, def string, minAge time.Duration) *kvstore.Store {
+		bucket := cmp.Or(ko.String("nats.buckets."+name), def)
+		st, err := kvstore.Open(context.Background(), js, bucket, minAge)
+		if err != nil {
+			log.Fatalf("error initializing nats kv (nats.buckets.%s): %v", name, err)
+		}
+		return st
+	}
+	return &kvStores{
+		nc:             nc,
+		sessions:       open("sessions", "libredesk_sessions", cmp.Or(ko.Duration("app.server.session_lifetime"), 9*time.Hour)),
+		widgetSessions: open("widget_sessions", "libredesk_widget_sessions", defaultSessionTTL),
+		hcCache:        open("hc_cache", "libredesk_hc_cache", helpCenterCacheTTL),
+		hcFeedback:     open("hc_feedback", "libredesk_hc_feedback", articleFeedbackDedupTTL),
+		oauthState:     open("oauth_state", "libredesk_oauth_state", oauthStateTTL),
+		pageVisits:     open("page_visits", "libredesk_page_visits", pageVisitTTL),
+		otpPending:     open("otp_pending", "libredesk_otp_pending", 10*time.Minute),
+		otpState:       open("otp_state", "libredesk_otp_state", 30*time.Minute),
+		rateLimit:      open("ratelimit", "libredesk_ratelimit", 2*time.Minute),
+	}
+}
+
+func initFastCache(kv *kvStores) *fastcache.FastCache {
+	return fastcache.New(kvstore.NewPageCache(kv.hcCache, int(kv.nc.MaxPayload())))
 }
 
 // initRedis inits postgres DB.
@@ -1139,7 +1178,7 @@ func initHelpCenter(db *sqlx.DB, i18n *i18n.I18n, indexer helpcenter.ArticleInde
 }
 
 // initAIAgent inits the autonomous AI agent manager.
-func initAIAgent(db *sqlx.DB, i18n *i18n.I18n, aiManager *ai.Manager, convo *conversation.Manager, inboxManager *inbox.Manager, mediaManager *media.Manager, settingManager *setting.Manager, userManager *user.Manager, notifierService *notifier.Service, rdb *redis.Client) *aiagent.Manager {
+func initAIAgent(db *sqlx.DB, i18n *i18n.I18n, aiManager *ai.Manager, convo *conversation.Manager, inboxManager *inbox.Manager, mediaManager *media.Manager, settingManager *setting.Manager, userManager *user.Manager, notifierService *notifier.Service, kv *kvStores) *aiagent.Manager {
 	m, err := aiagent.New(aiagent.Opts{
 		DB:                 db,
 		Lo:                 initLogger("ai_agent"),
@@ -1147,7 +1186,7 @@ func initAIAgent(db *sqlx.DB, i18n *i18n.I18n, aiManager *ai.Manager, convo *con
 		QueueSize:          cmp.Or(ko.Int("ai_agent.queue_size"), 1000),
 		MaxSteps:           min(max(cmp.Or(ko.Int("ai_agent.max_steps"), 6), 1), 20),
 		MaxHistoryMessages: min(max(cmp.Or(ko.Int("ai_agent.max_history_messages"), 30), 5), 100),
-	}, aiManager, convo, inboxManager, mediaManager, settingManager, userManager, notifierService, rdb)
+	}, aiManager, convo, inboxManager, mediaManager, settingManager, userManager, notifierService, kv.otpPending, kv.otpState)
 	if err != nil {
 		log.Fatalf("error initializing AI agent manager: %v", err)
 	}
@@ -1371,8 +1410,8 @@ func getLogLevel(lvl string) logf.Level {
 
 // initRateLimit initializes the rate limiter with default rules.
 // Defaults are used unless overridden in config.toml under [rate_limit.<name>].
-func initRateLimit(redisClient *redis.Client) *ratelimit.Limiter {
-	limiter := ratelimit.New(redisClient, initLogger("rate_limit"))
+func initRateLimit(store *kvstore.Store) *ratelimit.Limiter {
+	limiter := ratelimit.New(store, initLogger("rate_limit"))
 
 	defaults := []struct {
 		Name string

@@ -7,16 +7,17 @@ import (
 	"fmt"
 	"net/url"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/abhinavxd/libredesk/internal/httputil"
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
+	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	"github.com/fasthttp/websocket"
 	realip "github.com/ferluci/fast-realip"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 	"github.com/zerodha/fastglue"
 )
 
@@ -29,23 +30,25 @@ const (
 	WidgetMsgTypeJoined    = "joined"
 	WidgetMsgTypePageVisit = "page_visit"
 
-	pageVisitRedisKeyPrefix = "page_visits:"
-	maxPageVisits           = 20
-	pageVisitTTL            = 24 * time.Hour
-	wsReadDeadline          = 20 * time.Second
-	wsWriteDeadline         = 10 * time.Second
-	wsReadLimitBytes        = 64 * 1024
-	wsMaxJoinsPerConn       = 10
+	maxPageVisits     = 20
+	pageVisitTTL      = 24 * time.Hour
+	wsReadDeadline    = 20 * time.Second
+	wsWriteDeadline   = 10 * time.Second
+	wsReadLimitBytes  = 64 * 1024
+	wsMaxJoinsPerConn = 10
 
 	// Per-connection minimum intervals between inbound frames of each kind.
 	// The HTTP upgrade is rate-limited, but inbound frames aren't, so a single
-	// connection can otherwise drive unbounded DB/Redis work and agent fan-out.
+	// connection can otherwise drive unbounded DB/KV work and agent fan-out.
 	// Values are chosen to be just loose enough that no legitimate frontend
 	// cadence is ever throttled.
 	wsMinIntervalTyping    = 50 * time.Millisecond
 	wsMinIntervalPageVisit = 1 * time.Second
 	wsMinIntervalPing      = 1 * time.Second
 )
+
+// errSkipPageVisit aborts storing a page visit that repeats the latest one.
+var errSkipPageVisit = errors.New("repeated page visit")
 
 type WidgetMessage struct {
 	Type  string          `json:"type"`
@@ -342,41 +345,43 @@ func handleWidgetPageVisit(app *App, data json.RawMessage, contactID int) {
 		return
 	}
 
-	redisCtx := context.Background()
-	key := fmt.Sprintf("%s%d", pageVisitRedisKeyPrefix, contactID)
-
-	// Skip if the most recent page visit has the same URL.
-	latest, err := app.redis.LIndex(redisCtx, key, 0).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		app.lo.Warn("error checking visitor page history", "contact_id", contactID, "error", err)
-	}
-	if err == nil {
-		var lastVisit map[string]string
-		if json.Unmarshal([]byte(latest), &lastVisit) == nil && lastVisit["url"] == visit.URL {
-			return
-		}
-	}
-
 	entry, _ := json.Marshal(map[string]string{
 		"url":   visit.URL,
 		"title": visit.Title,
 		"time":  time.Now().UTC().Format(time.RFC3339),
 	})
 
-	pipe := app.redis.Pipeline()
-	pipe.LPush(redisCtx, key, string(entry))
-	pipe.LTrim(redisCtx, key, 0, maxPageVisits-1)
-	pipe.Expire(redisCtx, key, pageVisitTTL)
-	lrangeCmd := pipe.LRange(redisCtx, key, 0, maxPageVisits-1)
-	if _, err := pipe.Exec(redisCtx); err != nil {
-		app.lo.Warn("error saving visitor page history", "contact_id", contactID, "error", err)
+	// The list is a JSON array of entries, newest first, capped at maxPageVisits.
+	var entries []string
+	err = app.kv.pageVisits.Mutate(context.Background(), pageVisitKey(contactID), func(cur kvstore.Entry, found bool) ([]byte, time.Time, error) {
+		entries = nil
+		if found {
+			if err := json.Unmarshal(cur.Value, &entries); err != nil {
+				entries = nil
+			}
+		}
+		// Skip if the most recent page visit has the same URL.
+		if len(entries) > 0 {
+			var lastVisit map[string]string
+			if json.Unmarshal([]byte(entries[0]), &lastVisit) == nil && lastVisit["url"] == visit.URL {
+				return nil, time.Time{}, errSkipPageVisit
+			}
+		}
+		entries = append([]string{string(entry)}, entries...)
+		if len(entries) > maxPageVisits {
+			entries = entries[:maxPageVisits]
+		}
+		b, err := json.Marshal(entries)
+		return b, app.kv.pageVisits.ExpiresIn(pageVisitTTL), err
+	})
+	if errors.Is(err, errSkipPageVisit) {
+		return
+	}
+	if err != nil {
+		app.lo.Error("error storing page visit", "contact_id", contactID, "error", err)
 		return
 	}
 
-	entries, err := lrangeCmd.Result()
-	if err != nil {
-		return
-	}
 	pages := make([]map[string]string, 0, len(entries))
 	for _, e := range entries {
 		var p map[string]string
@@ -387,12 +392,17 @@ func handleWidgetPageVisit(app *App, data json.RawMessage, contactID int) {
 	app.conversation.BroadcastContactUpdate(contactID, map[string]any{"page_visits": pages})
 }
 
-func getPageVisitsFromRedis(app *App, contactID int) []map[string]string {
-	redisCtx := context.Background()
-	key := fmt.Sprintf("%s%d", pageVisitRedisKeyPrefix, contactID)
-	entries, err := app.redis.LRange(redisCtx, key, 0, maxPageVisits-1).Result()
+func getPageVisits(app *App, contactID int) []map[string]string {
+	e, err := app.kv.pageVisits.Get(context.Background(), pageVisitKey(contactID))
+	if errors.Is(err, kvstore.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		app.lo.Warn("error loading visitor page history", "contact_id", contactID, "error", err)
+		return nil
+	}
+	var entries []string
+	if err := json.Unmarshal(e.Value, &entries); err != nil {
 		return nil
 	}
 	pages := make([]map[string]string, 0, len(entries))
@@ -404,3 +414,5 @@ func getPageVisitsFromRedis(app *App, contactID int) []map[string]string {
 	}
 	return pages
 }
+
+func pageVisitKey(contactID int) string { return kvstore.Key(strconv.Itoa(contactID)) }

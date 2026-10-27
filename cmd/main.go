@@ -139,7 +139,8 @@ type App struct {
 	webhook            *webhook.Manager
 	contextLink        *contextlink.Manager
 	rateLimit          *ratelimit.Limiter
-	redis              *redis.Client
+	kv                 *kvStores
+	redis              *redis.Client // Only the WhatsApp queue, not ported to NATS: never set, so WhatsApp inbound is off.
 	db                 *sqlx.DB
 	fc                 *fastcache.FastCache
 	importer           *importer.Importer
@@ -245,7 +246,7 @@ func main() {
 		messageOutgoingScanInterval = ko.MustDuration(msgOutgoingScanIntervalKey)
 		slaEvaluationInterval       = ko.MustDuration("sla.evaluation_interval")
 		lo                          = initLogger(appName)
-		rdb                         = initRedis()
+		kv                          = initKV()
 		constants                   = initConstants()
 		i18n                        = initI18n(fs)
 		csat                        = initCSAT(db, i18n)
@@ -260,7 +261,7 @@ func main() {
 		businessHours               = initBusinessHours(db, i18n)
 		webhook                     = initWebhook(db, i18n, ssrfControl)
 		user                        = initUser(i18n, db)
-		auth                        = initAuth(oidc, rdb, i18n, ssrfControl)
+		auth                        = initAuth(oidc, kv.sessions, i18n, ssrfControl)
 		wsHub                       = initWS(user)
 		notifier                    = initNotifier()
 		userNotification            = initUserNotification(db, i18n)
@@ -273,10 +274,10 @@ func main() {
 		ai                          = initAI(ctx, db, i18n, ssrfControl)
 		sla                         = initSLA(db, team, settings, businessHours, template, user, i18n, notifDispatcher)
 		conversation                = initConversations(i18n, sla, status, priority, wsHub, db, inbox, user, team, media, settings, csat, automation, template, webhook, notifDispatcher)
-		aiAgent                     = initAIAgent(db, i18n, ai, conversation, inbox, media, settings, user, notifier, rdb)
+		aiAgent                     = initAIAgent(db, i18n, ai, conversation, inbox, media, settings, user, notifier, kv)
 		helpCenter                  = initHelpCenter(db, i18n, ai)
 		autoassigner                = initAutoAssigner(team, user, conversation)
-		rateLimiter                 = initRateLimit(rdb)
+		rateLimiter                 = initRateLimit(kv.rateLimit)
 	)
 
 	wsHub.SetConversationStore(conversation)
@@ -352,9 +353,9 @@ func main() {
 		contextLink:      initContextLink(db, i18n),
 		proactive:        initProactive(db, i18n),
 		rateLimit:        rateLimiter,
-		redis:            rdb,
+		kv:               kv,
 		db:               db,
-		fc:               initFastCache(rdb),
+		fc:               initFastCache(kv),
 		userNotification: userNotification,
 		whatsappClient:   waClient,
 		whatsappTemplate: waTemplates,
@@ -450,8 +451,8 @@ func main() {
 	app.importer.Close()
 	lo.Info("shutting down database")
 	db.Close()
-	lo.Info("shutting down redis")
-	rdb.Close()
+	lo.Info("shutting down nats")
+	kv.nc.Close()
 	lo.Info("shutdown complete")
 }
 
