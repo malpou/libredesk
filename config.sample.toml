@@ -99,6 +99,9 @@ max_lifetime = "300s"
 url = "nats://nats:4222"
 # Credentials file (JWT + nkey). Takes precedence over user/password when both are set.
 creds_file = ""
+# Read on every connect and reconnect, for a rotating secret (a Kubernetes ServiceAccount
+# token checked by an auth callout). Takes precedence over password when user is set.
+password_file = ""
 user = ""
 password = ""
 
