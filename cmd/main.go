@@ -33,7 +33,6 @@ import (
 	"github.com/abhinavxd/libredesk/internal/sla"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 	"github.com/abhinavxd/libredesk/internal/view"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/abhinavxd/libredesk/internal/automation"
 	contextlink "github.com/abhinavxd/libredesk/internal/context_link"
@@ -131,7 +130,7 @@ type App struct {
 	webhook          *webhook.Manager
 	contextLink      *contextlink.Manager
 	rateLimit        *ratelimit.Limiter
-	redis            *redis.Client
+	kv               *kvStores
 	fc               *fastcache.FastCache
 	importer         *importer.Importer
 	wsHub            *ws.Hub
@@ -230,7 +229,7 @@ func main() {
 		messageOutgoingScanInterval = ko.MustDuration(msgOutgoingScanIntervalKey)
 		slaEvaluationInterval       = ko.MustDuration("sla.evaluation_interval")
 		lo                          = initLogger(appName)
-		rdb                         = initRedis()
+		kv                          = initKV()
 		constants                   = initConstants()
 		i18n                        = initI18n(fs)
 		csat                        = initCSAT(db, i18n)
@@ -238,7 +237,7 @@ func main() {
 		status                      = initStatus(db, i18n)
 		priority                    = initPriority(db, i18n)
 		ssrfControl                 = initSSRFControl()
-		auth                        = initAuth(oidc, rdb, i18n, ssrfControl)
+		auth                        = initAuth(oidc, kv.sessions, i18n, ssrfControl)
 		template                    = initTemplate(db, fs, constants, i18n)
 		media                       = initMedia(db, i18n, settings)
 		inbox                       = initInbox(db, i18n)
@@ -254,10 +253,10 @@ func main() {
 		ai                          = initAI(ctx, db, i18n, ssrfControl)
 		sla                         = initSLA(db, team, settings, businessHours, template, user, i18n, notifDispatcher)
 		conversation                = initConversations(i18n, sla, status, priority, wsHub, db, inbox, user, team, media, settings, csat, automation, template, webhook, notifDispatcher)
-		aiAgent                     = initAIAgent(db, i18n, ai, conversation, media, settings, user, notifier, rdb)
+		aiAgent                     = initAIAgent(db, i18n, ai, conversation, media, settings, user, notifier, kv)
 		helpCenter                  = initHelpCenter(db, i18n, ai)
 		autoassigner                = initAutoAssigner(team, user, conversation)
-		rateLimiter                 = initRateLimit(rdb)
+		rateLimiter                 = initRateLimit(kv.rateLimit)
 	)
 
 	wsHub.SetConversationStore(conversation)
@@ -326,8 +325,8 @@ func main() {
 		webhook:          webhook,
 		contextLink:      initContextLink(db, i18n),
 		rateLimit:        rateLimiter,
-		redis:            rdb,
-		fc:               initFastCache(rdb),
+		kv:               kv,
+		fc:               initFastCache(kv),
 		userNotification: userNotification,
 		wsHub:            wsHub,
 	}
@@ -403,8 +402,8 @@ func main() {
 	app.importer.Close()
 	colorlog.Red("Shutting down database...")
 	db.Close()
-	colorlog.Red("Shutting down redis...")
-	rdb.Close()
+	colorlog.Red("Shutting down nats...")
+	kv.nc.Close()
 	colorlog.Green("Shutdown complete.")
 }
 
