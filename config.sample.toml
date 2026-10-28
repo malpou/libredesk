@@ -103,6 +103,7 @@ max_lifetime = "300s"
 # short-lived state. libredesk binds to existing buckets and never creates them: run
 # scripts/nats-kv-buckets.sh (or provision the same buckets) first. Startup fails if a bucket
 # is missing or its max age is shorter than the values libredesk keeps in it.
+# WhatsApp inbound is off on this build: its Redis Streams queue is not ported to NATS.
 [nats]
 # If running locally, use `nats://localhost:4222`.
 url = "nats://nats:4222"
