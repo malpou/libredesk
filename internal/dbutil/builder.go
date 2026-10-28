@@ -16,6 +16,8 @@ var ErrTooManyGroups = errors.New("too many filter groups")
 
 var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+var likePatternEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 var valueRequiredOperators = map[string]bool{
 	"equals":       true,
 	"not equals":   true,
@@ -105,24 +107,9 @@ func BuildPaginatedQuery(baseQuery string, existingArgs []any, opts PaginationOp
 		return "", nil, fmt.Errorf("invalid page size: %d", opts.PageSize)
 	}
 
-	root, err := parseFilters(filtersJSON)
+	query, args, err := BuildFilterQuery(baseQuery, existingArgs, filtersJSON, allowedFields, renderers, opts.Location)
 	if err != nil {
 		return "", nil, err
-	}
-
-	loc := stringutil.NormalizeTimezone(opts.Location)
-
-	whereClause, filterArgs, err := buildWhereClause(root, existingArgs, allowedFields, renderers, loc)
-	if err != nil {
-		return "", nil, err
-	}
-
-	query := baseQuery
-	args := existingArgs
-
-	if whereClause != "" {
-		query += " AND " + whereClause
-		args = append(args, filterArgs...)
 	}
 
 	if opts.OrderBy != "" {
@@ -151,6 +138,31 @@ func BuildPaginatedQuery(baseQuery string, existingArgs []any, opts PaginationOp
 	return query, args, nil
 }
 
+// BuildFilterQuery appends validated filter conditions with AND to a base query that already has a WHERE clause.
+func BuildFilterQuery(baseQuery string, existingArgs []any, filtersJSON string, allowedFields AllowedFields, renderers FieldRenderers, loc string) (string, []any, error) {
+	root, err := parseFilters(filtersJSON)
+	if err != nil {
+		return "", nil, err
+	}
+
+	loc = stringutil.NormalizeTimezone(loc)
+
+	whereClause, filterArgs, err := buildWhereClause(root, existingArgs, allowedFields, renderers, loc)
+	if err != nil {
+		return "", nil, err
+	}
+
+	query := baseQuery
+	args := existingArgs
+
+	if whereClause != "" {
+		query += " AND " + whereClause
+		args = append(args, filterArgs...)
+	}
+
+	return query, args, nil
+}
+
 // ValidateFilters parses and structurally validates a filters payload without running a query.
 func ValidateFilters(filtersJSON string, allowedFields AllowedFields, renderers FieldRenderers) error {
 	root, err := parseFilters(filtersJSON)
@@ -161,6 +173,10 @@ func ValidateFilters(filtersJSON string, allowedFields AllowedFields, renderers 
 	next := 1
 	_, err = buildNode(root, &args, &next, allowedFields, renderers, 0, "UTC")
 	return err
+}
+
+func ContainsPattern(value string) string {
+	return "%" + likePatternEscaper.Replace(value) + "%"
 }
 
 // parseFilters accepts either a legacy flat array of leaves or a {logic, rules} group object.
@@ -388,13 +404,13 @@ func buildLeaf(f FilterNode, args *[]any, next *int, allowedFields AllowedFields
 		*next += 2
 		return cond, nil
 	case "contains", "ilike":
-		cond := fmt.Sprintf("%s ILIKE $%d", field, *next)
-		*args = append(*args, "%"+f.Value+"%")
+		cond := fmt.Sprintf("%s ILIKE $%d ESCAPE '\\'", field, *next)
+		*args = append(*args, ContainsPattern(f.Value))
 		*next++
 		return cond, nil
 	case "not contains":
-		cond := fmt.Sprintf("%s NOT ILIKE $%d", field, *next)
-		*args = append(*args, "%"+f.Value+"%")
+		cond := fmt.Sprintf("%s NOT ILIKE $%d ESCAPE '\\'", field, *next)
+		*args = append(*args, ContainsPattern(f.Value))
 		*next++
 		return cond, nil
 	default:

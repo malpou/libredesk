@@ -65,10 +65,28 @@ func handleGetAgents(r *fastglue.Request) error {
 	return r.SendEnvelope(agents)
 }
 
-// handleGetAgentsCompact returns all agents in a compact format.
+// handleGetAgentsCompact returns agents in a compact format, all of them without page params.
 func handleGetAgentsCompact(r *fastglue.Request) error {
-	var app = r.Context.(*App)
-	agents, err := app.user.GetAgentsCompact()
+	var (
+		app         = r.Context.(*App)
+		query       = string(r.RequestCtx.QueryArgs().Peek("q"))
+		userType    = string(r.RequestCtx.QueryArgs().Peek("type"))
+		enabledOnly = string(r.RequestCtx.QueryArgs().Peek("enabled")) == "true"
+	)
+	switch userType {
+	case "", models.UserTypeAgent, models.UserTypeAIAssistant:
+	default:
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.InputError)
+	}
+	if ids := getIDsParam(r, "ids"); len(ids) > 0 {
+		agents, err := app.user.GetAgentsCompactByIDs(ids)
+		if err != nil {
+			return sendErrorEnvelope(r, err)
+		}
+		return r.SendEnvelope(agents)
+	}
+	page, pageSize := getOptionalPagination(r)
+	agents, err := app.user.GetAgentsCompact(query, userType, enabledOnly, page, pageSize)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
@@ -160,7 +178,7 @@ func handleUpdateCurrentAgent(r *fastglue.Request) error {
 	)
 	form, err := r.RequestCtx.MultipartForm()
 	if err != nil {
-		app.lo.Error("error parsing form data", "error", err)
+		app.lo.Debug("error parsing form data", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("errors.parsingRequest"), nil, envelope.GeneralError)
 	}
 
@@ -284,6 +302,11 @@ func handleUpdateAgent(r *fastglue.Request) error {
 
 	app.user.InvalidateAgentCache(id)
 	app.wsHub.KickUser(id)
+	if req.NewPassword != "" || !req.Enabled {
+		if err := app.auth.DestroyUserSessions(r.RequestCtx, id); err != nil {
+			return sendErrorEnvelope(r, err)
+		}
+	}
 
 	// Create activity log if user availability status changed.
 	if oldAvailabilityStatus != req.AvailabilityStatus {
@@ -336,6 +359,9 @@ func handleDeleteAgent(r *fastglue.Request) error {
 
 	defer app.wsHub.KickUser(id)
 	defer app.user.InvalidateAgentCache(id)
+	if err := app.auth.DestroyUserSessions(r.RequestCtx, id); err != nil {
+		return sendErrorEnvelope(r, err)
+	}
 
 	// Unassign all open conversations assigned to the user.
 	if err := app.conversation.UnassignOpen(id); err != nil {
@@ -469,6 +495,9 @@ func handleSetPassword(r *fastglue.Request) error {
 	}
 	app.user.InvalidateAgentCache(id)
 	app.wsHub.KickUser(id)
+	if err := app.auth.DestroyUserSessions(r.RequestCtx, id); err != nil {
+		return sendErrorEnvelope(r, err)
+	}
 
 	return r.SendEnvelope(true)
 }
@@ -516,7 +545,7 @@ func uploadUserAvatar(r *fastglue.Request, user models.User, files []*multipart.
 
 	resized, err := image.Downscale(image.AvatarMaxDim, file)
 	if err != nil {
-		app.lo.Error("error downscaling avatar", "user_id", user.ID, "error", err)
+		app.lo.Debug("error downscaling avatar", "user_id", user.ID, "error", err)
 		return envelope.NewError(envelope.InputError, app.i18n.T("globals.messages.fileTypeisNotAnImage"), nil)
 	}
 	srcFileSize := resized.Len()

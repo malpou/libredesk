@@ -1,18 +1,23 @@
 <template>
   <Tabs default-value="new_conversation" v-model="selectedTab">
-    <TabsList class="grid w-full grid-cols-3 mb-5">
-      <TabsTrigger value="new_conversation">
-        {{
-          $t('conversation.newConversation')
-        }}
-      </TabsTrigger>
-      <TabsTrigger value="conversation_update">
-        {{ $t('admin.automation.conversationUpdate') }}
-      </TabsTrigger>
-      <TabsTrigger value="time_trigger">
-        {{ $t('admin.automation.timeTriggers') }}
-      </TabsTrigger>
-    </TabsList>
+    <AdminToolbar class="mb-5">
+      <template #left>
+        <TabsList class="w-max justify-start">
+          <TabsTrigger value="new_conversation">
+            {{ $t('conversation.newConversation') }}
+          </TabsTrigger>
+          <TabsTrigger value="conversation_update">
+            {{ $t('admin.automation.conversationUpdate') }}
+          </TabsTrigger>
+          <TabsTrigger value="time_trigger">
+            {{ $t('admin.automation.timeTriggers') }}
+          </TabsTrigger>
+        </TabsList>
+      </template>
+      <template v-if="$slots.actions" #actions>
+        <slot name="actions" />
+      </template>
+    </AdminToolbar>
     <TabsContent value="new_conversation">
       <RuleTab
         type="new_conversation"
@@ -32,6 +37,7 @@
 </template>
 
 <script setup>
+import AdminToolbar from '@main/layouts/admin/AdminToolbar.vue'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@shared-ui/components/ui/tabs'
 import { useI18n } from 'vue-i18n'
 import RuleTab from './RuleTab.vue'

@@ -7,23 +7,13 @@ export default class MessageCache {
     }
 
     addMessages (convId, messages, page, totalPages) {
-        const conv = this.cache.get(convId)
+        const conv = this._getOrCreateConversation(convId)
         const uniqueMsgs = messages.filter(m => !this.hasMessage(convId, m.uuid))
 
-        if (conv) {
-            conv.lastFetchedPage = Math.max(page, conv.lastFetchedPage)
-            conv.hasMore = totalPages > conv.lastFetchedPage
-            conv.totalPages = totalPages
-            conv.pages.set(page, uniqueMsgs)
-        } else {
-            this.cache.set(convId, {
-                pages: new Map([[page, uniqueMsgs]]),
-                totalPages,
-                lastFetchedPage: page,
-                hasMore: totalPages > page,
-            })
-            this.pruneOldConversations(convId)
-        }
+        conv.lastFetchedPage = Math.max(page, conv.lastFetchedPage)
+        conv.hasMore = totalPages > conv.lastFetchedPage
+        conv.totalPages = totalPages
+        conv.pages.set(page, [...(conv.pages.get(page) || []), ...uniqueMsgs])
     }
 
     purgeConversation (convId) {
@@ -35,8 +25,8 @@ export default class MessageCache {
     }
 
     addMessage (convId, message) {
-        const conv = this.cache.get(convId)
-        if (!conv || this.hasMessage(convId, message.uuid)) return
+        const conv = this._getOrCreateConversation(convId)
+        if (this.hasMessage(convId, message.uuid)) return
         if (!conv.pages.has(1)) {
             conv.pages.set(1, [message])
         } else {
@@ -46,7 +36,7 @@ export default class MessageCache {
 
     getAllPagesMessages (convId) {
         return this._allMessages(convId)
-            .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+            .sort((a, b) => new Date(a.created_at) - new Date(b.created_at) || (a.id || 0) - (b.id || 0))
     }
 
     getLatestMessage (convId, type = [], excludePrivate = false, excludeAutomated = false) {
@@ -56,7 +46,7 @@ export default class MessageCache {
             if (excludeAutomated && msg.meta?.is_automated) return false
             return true
         })
-        filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        filtered.sort((a, b) => new Date(b.created_at) - new Date(a.created_at) || (b.id || 0) - (a.id || 0))
         return filtered.length ? filtered[0] : null
     }
 
@@ -97,6 +87,19 @@ export default class MessageCache {
 
     hasConversation (convId) {
         return this.cache.has(convId)
+    }
+
+    _getOrCreateConversation (convId) {
+        if (!this.cache.has(convId)) {
+            this.cache.set(convId, {
+                pages: new Map(),
+                totalPages: 0,
+                lastFetchedPage: 0,
+                hasMore: false,
+            })
+            this.pruneOldConversations(convId)
+        }
+        return this.cache.get(convId)
     }
 
     _allMessages (convId) {

@@ -1,27 +1,28 @@
 <template>
   <Sheet :open="isOpen" @update:open="$emit('update:open', $event)">
-    <SheetContent class="!max-w-[60vw] sm:!max-w-[60vw] h-full p-0 flex flex-col">
+    <SheetContent class="w-full !max-w-full lg:!max-w-[60vw] h-full p-0 flex flex-col">
       <div class="flex-1 flex flex-col min-h-0">
-        <div class="flex items-center justify-between p-6 border-b bg-card/50">
+        <div class="flex items-center justify-between p-4 sm:p-6 border-b bg-card/50">
           <div>
             <SheetTitle>
               {{ collection ? t('helpCenter.editCollection') : t('helpCenter.newCollection') }}
             </SheetTitle>
             <SheetDescription v-if="collection" class="mt-1">
               {{ t('globals.terms.lastUpdated') }}:
-              {{ format(new Date(collection.updated_at), 'PPpp') }}
+              {{ formatDate(collection.updated_at) }}
             </SheetDescription>
           </div>
         </div>
 
-        <div class="flex-1 flex min-h-0">
-          <div class="flex-1 flex flex-col p-6 space-y-6 min-h-0 overflow-y-auto">
+        <div class="flex-1 min-h-0 overflow-y-auto lg:flex lg:overflow-hidden">
+          <div class="min-w-0 flex-1 flex flex-col p-4 sm:p-6 space-y-6 lg:min-h-0 overflow-y-auto">
             <form @submit="onSubmit" novalidate class="space-y-4 flex-1 flex flex-col min-h-0">
               <FormField v-slot="{ componentField }" name="name">
                 <FormItem>
                   <FormControl>
                     <Input
                       ref="nameInput"
+                      :aria-label="t('globals.terms.name')"
                       type="text"
                       :placeholder="t('globals.terms.name')"
                       v-bind="componentField"
@@ -48,10 +49,12 @@
             </form>
           </div>
 
-          <div class="w-72 border-l bg-muted/20 p-6 overflow-y-auto">
+          <div
+            class="w-full border-t bg-muted/20 p-4 sm:p-6 lg:w-72 lg:shrink-0 lg:border-l lg:border-t-0 lg:overflow-y-auto"
+          >
             <div class="space-y-6">
               <div class="space-y-4">
-                <h3 class="font-medium text-sm text-muted-foreground">
+                <h3 class="ui-heading">
                   {{ t('globals.terms.action', 2) }}
                 </h3>
 
@@ -88,7 +91,7 @@
               </FormField>
 
               <div class="space-y-3">
-                <h3 class="font-medium text-sm text-muted-foreground">
+                <h3 class="ui-heading">
                   {{ t('globals.terms.icon') }}
                 </h3>
                 <FormField v-slot="{ value, handleChange }" name="icon">
@@ -102,7 +105,7 @@
               </div>
 
               <div class="space-y-3">
-                <h3 class="font-medium text-sm text-muted-foreground">
+                <h3 class="ui-heading">
                   {{ t('globals.terms.language') }}
                 </h3>
                 <FormField v-slot="{ componentField }" name="locale">
@@ -125,7 +128,7 @@
               </div>
 
               <div v-if="localeParents.length > 0" class="space-y-3">
-                <h3 class="font-medium text-sm text-muted-foreground">
+                <h3 class="ui-heading">
                   {{ t('helpCenter.parentCollection') }}
                 </h3>
 
@@ -156,11 +159,11 @@
               <div v-if="collection" class="space-y-3 text-sm border-t pt-4">
                 <div class="flex justify-between py-1">
                   <span class="text-muted-foreground">{{ t('globals.terms.createdAt') }}</span>
-                  <span>{{ format(new Date(collection.created_at), 'PPpp') }}</span>
+                  <span>{{ formatDate(collection.created_at) }}</span>
                 </div>
                 <div class="flex justify-between py-1">
                   <span class="text-muted-foreground">{{ t('globals.terms.updatedAt') }}</span>
-                  <span>{{ format(new Date(collection.updated_at), 'PPpp') }}</span>
+                  <span>{{ formatDate(collection.updated_at) }}</span>
                 </div>
                 <div v-if="collection.articles" class="flex justify-between py-1">
                   <span class="text-muted-foreground">{{ t('globals.terms.article', 2) }}</span>
@@ -205,9 +208,13 @@ import api from '@/api'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { useEmitter } from '@/composables/useEmitter.js'
 import { EMITTER_EVENTS } from '@/constants/emitterEvents.js'
-import { format } from 'date-fns'
+import { format, isValid } from 'date-fns'
 
 const { t } = useI18n()
+const formatDate = (value) => {
+  const date = new Date(value)
+  return isValid(date) ? format(date, 'PPpp') : '-'
+}
 
 const props = defineProps({
   isOpen: {

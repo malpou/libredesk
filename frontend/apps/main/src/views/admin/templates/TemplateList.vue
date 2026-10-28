@@ -1,33 +1,45 @@
 <template>
   <LoadingOverlay :loading="isLoading" reserve-height>
-    <div class="flex justify-between mb-5">
-      <div></div>
-      <div class="flex justify-end mb-4">
-        <Button
-          @click="navigateToNewTemplate"
-          :disabled="templateType !== 'email_outgoing'"
-        >
-          {{
-            $t('template.new')
-          }}
-        </Button>
-      </div>
-    </div>
     <div>
       <Tabs default-value="email_outgoing" v-model="templateType">
-        <TabsList class="grid w-full grid-cols-2 mb-5">
-          <TabsTrigger value="email_outgoing">
-            {{ $t('admin.template.outgoingEmailTemplates') }}
-          </TabsTrigger>
-          <TabsTrigger value="email_notification">
-            {{ $t('admin.template.emailNotificationTemplates') }}
-          </TabsTrigger>
-        </TabsList>
+        <AdminToolbar v-model:search="searchTerm" searchable class="mb-5">
+          <template #left>
+            <TabsList class="w-max justify-start">
+              <TabsTrigger value="email_outgoing">
+                {{ $t('admin.template.outgoingEmailTemplates') }}
+              </TabsTrigger>
+              <TabsTrigger value="email_notification">
+                {{ $t('admin.template.emailNotificationTemplates') }}
+              </TabsTrigger>
+            </TabsList>
+          </template>
+          <template #actions>
+            <Button
+              type="button"
+              @click="navigateToNewTemplate"
+              :disabled="templateType !== 'email_outgoing'"
+            >
+              {{ $t('globals.messages.newTemplate') }}
+            </Button>
+          </template>
+        </AdminToolbar>
         <TabsContent value="email_outgoing">
-          <DataTable :columns="createOutgoingEmailTableColumns(t)" :data="templates" :loading="isLoading" />
+          <DataTable
+            v-model:search="searchTerm"
+            :searchable="false"
+            :columns="createOutgoingEmailTableColumns(t)"
+            :data="templates"
+            :loading="isLoading"
+          />
         </TabsContent>
         <TabsContent value="email_notification">
-          <DataTable :columns="createEmailNotificationTableColumns(t)" :data="templates" :loading="isLoading" />
+          <DataTable
+            v-model:search="searchTerm"
+            :searchable="false"
+            :columns="createEmailNotificationTableColumns(t)"
+            :data="templates"
+            :loading="isLoading"
+          />
         </TabsContent>
       </Tabs>
     </div>
@@ -37,22 +49,24 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import DataTable from '@main/components/datatable/DataTable.vue'
+import AdminToolbar from '@main/layouts/admin/AdminToolbar.vue'
 import {
   createOutgoingEmailTableColumns,
   createEmailNotificationTableColumns
-} from '../../../features/admin/templates/dataTableColumns.js'
+} from '@main/features/admin/templates/dataTableColumns.js'
 import { Button } from '@shared-ui/components/ui/button'
 import { useRouter } from 'vue-router'
 import LoadingOverlay from '@main/components/layout/LoadingOverlay.vue'
-import { useEmitter } from '../../../composables/useEmitter'
-import { EMITTER_EVENTS } from '../../../constants/emitterEvents.js'
+import { useEmitter } from '@main/composables/useEmitter'
+import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@shared-ui/components/ui/tabs'
 import { useStorage } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
-import api from '../../../api'
+import api from '@main/api'
 
 const templateType = useStorage('templateType', 'email_outgoing')
+const searchTerm = ref('')
 const { t } = useI18n()
 const templates = ref([])
 const isLoading = ref(false)
@@ -96,6 +110,7 @@ const navigateToNewTemplate = () => {
 }
 
 watch(templateType, () => {
+  searchTerm.value = ''
   templates.value = []
   fetchAll()
 })

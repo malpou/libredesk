@@ -13,6 +13,8 @@ import (
 	"github.com/knadh/go-i18n"
 	"github.com/knadh/stuffbin"
 	"github.com/zerodha/fastglue"
+	"github.com/zerodha/logf"
+	"golang.org/x/text/language"
 )
 
 const (
@@ -22,6 +24,10 @@ const (
 var (
 	localeI18nMu    sync.Mutex
 	localeI18nCache = map[string]*i18n.I18n{}
+
+	// Keyed by resolved language code
+	i18nJSONMu    sync.Mutex
+	i18nJSONCache = map[string][]byte{}
 )
 
 // handleGetI18nLang returns the JSON language pack for the given language code.
@@ -30,11 +36,14 @@ func handleGetI18nLang(r *fastglue.Request) error {
 		app  = r.Context.(*App)
 		lang = r.RequestCtx.UserValue("lang").(string)
 	)
-	i, err := loadI18nLang(lang, app.fs)
+	b, err := i18nLangJSON(app, lang)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
-	return r.SendBytes(http.StatusOK, "application/json", i.JSON())
+	r.RequestCtx.Response.Header.SetContentType("application/json")
+	r.RequestCtx.Response.SetStatusCode(http.StatusOK)
+	r.RequestCtx.Response.SetBodyRaw(b)
+	return nil
 }
 
 // handleGetAvailableLanguages returns the list of available languages
@@ -44,6 +53,7 @@ func handleGetAvailableLanguages(r *fastglue.Request) error {
 
 	files, err := app.fs.Glob("/i18n/*.json")
 	if err != nil {
+		app.lo.Error("error listing language files", "error", err)
 		return sendErrorEnvelope(r, envelope.NewError(envelope.GeneralError, "error listing language files", nil))
 	}
 
@@ -57,11 +67,13 @@ func handleGetAvailableLanguages(r *fastglue.Request) error {
 		code := strings.TrimSuffix(filepath.Base(f), ".json")
 		b, err := app.fs.Read(f)
 		if err != nil {
+			app.lo.Warn("error reading available language", "language", code, "error", err)
 			continue
 		}
 
 		var meta map[string]string
 		if err := json.Unmarshal(b, &meta); err != nil {
+			app.lo.Warn("error parsing available language", "language", code, "error", err)
 			continue
 		}
 
@@ -88,7 +100,7 @@ func localeI18n(app *App, locale string) *i18n.I18n {
 	if i, ok := localeI18nCache[loc]; ok {
 		return i
 	}
-	i, err := loadI18nLang(matchLangFile(app.fs, loc), app.fs)
+	i, err := loadI18nLang(matchLangFile(app.fs, loc), app.fs, app.lo)
 	if err != nil || i == nil {
 		i = app.i18n
 	}
@@ -96,21 +108,47 @@ func localeI18n(app *App, locale string) *i18n.I18n {
 	return i
 }
 
-// matchLangFile finds the language pack code for a locale: exact match first, then language prefix.
+// i18nLangJSON returns the marshaled language pack for a language code, cached per resolved code.
+func i18nLangJSON(app *App, lang string) ([]byte, error) {
+	code := matchLangFile(app.fs, strings.ToLower(strings.TrimSpace(lang)))
+	i18nJSONMu.Lock()
+	defer i18nJSONMu.Unlock()
+	if b, ok := i18nJSONCache[code]; ok {
+		return b, nil
+	}
+	i, err := loadI18nLang(code, app.fs, app.lo)
+	if err != nil {
+		return nil, err
+	}
+	b := i.JSON()
+	i18nJSONCache[code] = b
+	return b, nil
+}
+
 func matchLangFile(fs stuffbin.FileSystem, loc string) string {
+	wanted, err := language.All.Parse(strings.TrimSpace(loc))
+	if err != nil || wanted.IsRoot() {
+		return defLang
+	}
 	files, err := fs.Glob("/i18n/*.json")
 	if err != nil {
 		return defLang
 	}
-	lang := strings.SplitN(loc, "-", 2)[0]
+	wantedBase, _ := wanted.Base()
+	wantedScript, _ := wanted.Script()
 	prefixMatch := ""
 	for _, f := range files {
 		code := strings.TrimSuffix(filepath.Base(f), ".json")
-		lc := strings.ToLower(code)
-		if lc == loc {
+		available, err := language.All.Parse(code)
+		if err != nil {
+			continue
+		}
+		if available.String() == wanted.String() {
 			return code
 		}
-		if prefixMatch == "" && (lc == lang || strings.HasPrefix(lc, lang+"-")) {
+		base, _ := available.Base()
+		script, _ := available.Script()
+		if prefixMatch == "" && base == wantedBase && script == wantedScript {
 			prefixMatch = code
 		}
 	}
@@ -121,7 +159,7 @@ func matchLangFile(fs stuffbin.FileSystem, loc string) string {
 }
 
 // loadI18nLang loads the i18n language pack for the given language code.
-func loadI18nLang(lang string, fs stuffbin.FileSystem) (*i18n.I18n, error) {
+func loadI18nLang(lang string, fs stuffbin.FileSystem, logger *logf.Logger) (*i18n.I18n, error) {
 	// Helper function to read and initialize i18n language.
 	readLang := func(lang string) ([]byte, error) {
 		return fs.Read(fmt.Sprintf("/i18n/%s.json", lang))
@@ -130,18 +168,23 @@ func loadI18nLang(lang string, fs stuffbin.FileSystem) (*i18n.I18n, error) {
 	// Read default language.
 	b, err := readLang(defLang)
 	if err != nil {
+		logger.Error("error reading default language", "language", defLang, "error", err)
 		return nil, envelope.NewError(envelope.GeneralError, "error reading default language", nil)
 	}
 
 	// Initialize with the default language.
 	i, err := i18n.New(b)
 	if err != nil {
+		logger.Error("error parsing default language", "language", defLang, "error", err)
 		return nil, envelope.NewError(envelope.GeneralError, "error unmarshalling i18n language", nil)
 	}
 
 	// Load the selected language on top of it.
-	if b, err = readLang(lang); err == nil {
+	if b, err = readLang(lang); err != nil {
+		logger.Warn("selected language unavailable, using default language", "language", lang, "error", err)
+	} else {
 		if err := i.Load(b); err != nil {
+			logger.Error("error loading selected language", "language", lang, "error", err)
 			return i, envelope.NewError(envelope.GeneralError, "error loading i18n language file", nil)
 		}
 	}

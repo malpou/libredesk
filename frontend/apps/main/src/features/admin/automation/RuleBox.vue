@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="rule-group box p-5">
     <div class="mb-5">
       <RadioGroup
         class="flex"
@@ -10,7 +10,9 @@
           <RadioGroupItem value="OR" />
           <Label>
             <i18n-t keypath="admin.automation.matchBelow">
-              <template #any_or_all><b>{{ $t('admin.automation.any') }}</b></template>
+              <template #any_or_all
+                ><b>{{ $t('admin.automation.any') }}</b></template
+              >
             </i18n-t>
           </Label>
         </div>
@@ -18,14 +20,16 @@
           <RadioGroupItem value="AND" />
           <Label>
             <i18n-t keypath="admin.automation.matchBelow">
-              <template #any_or_all><b>{{ $t('admin.automation.all') }}</b></template>
+              <template #any_or_all
+                ><b>{{ $t('admin.automation.all') }}</b></template
+              >
             </i18n-t>
           </Label>
         </div>
       </RadioGroup>
     </div>
 
-    <div class="space-y-6" :class="{ 'box p-5': ruleGroup.rules?.length > 0 }">
+    <div class="space-y-6">
       <div class="space-y-6">
         <div v-for="(rule, index) in ruleGroup.rules" :key="rule" class="space-y-6">
           <div v-if="index > 0">
@@ -33,150 +37,153 @@
           </div>
 
           <!-- Field -->
-          <div class="flex space-x-5 items-start">
-            <Select
-              v-model="rule.field"
-              @update:modelValue="(value) => handleFieldChange(value, index)"
-            >
-              <SelectTrigger class="w-56">
-                <SelectValue :placeholder="t('placeholders.selectField')" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <!-- Conversation fields -->
-                  <SelectLabel>{{ $t('globals.terms.conversation') }}</SelectLabel>
-                  <SelectItem v-for="(field, key) in currentFilters" :key="key" :value="key">
-                    {{ field.label }}
-                  </SelectItem>
-                  <!-- Contact custom attributes -->
-                  <SelectLabel>{{ $t('globals.terms.contact') }}</SelectLabel>
-                  <SelectItem
-                    v-for="(field, key) in contactCustomAttributes"
-                    :key="key"
-                    :value="key"
-                  >
-                    {{ field.label }}
-                  </SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-
-            <!-- Operator -->
-            <Select
-              v-model="rule.operator"
-              @update:modelValue="(value) => handleOperatorChange(value, index)"
-            >
-              <SelectTrigger class="w-56">
-                <SelectValue :placeholder="t('placeholders.selectOperator')" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem
-                    v-for="(op, key) in getFieldOperators(rule.field, rule.field_type)"
-                    :key="key"
-                    :value="op"
-                  >
-                    {{ operatorLabel(op, t) }}
-                  </SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-
-            <!-- Value -->
-            <div v-if="showInput(index)" class="flex-1">
-              <!-- Plain text input -->
-              <Input
-                type="text"
-                :placeholder="t('actions.setValue')"
-                v-if="inputType(index) === 'text'"
-                v-model="rule.value"
-                @update:modelValue="(value) => handleValueChange(value, index)"
-                @keydown.enter.prevent
-              />
-
-              <!-- Number input -->
-              <Input
-                type="number"
-                :placeholder="t('actions.setValue')"
-                v-if="inputType(index) === 'number'"
-                v-model="rule.value"
-                @update:modelValue="(value) => handleValueChange(value, index)"
-                @keydown.enter.prevent
-              />
-
-              <!-- Select input -->
-              <div v-if="inputType(index) === 'select'">
-                <SelectComboBox
-                  v-model="rule.value"
-                  :items="getFieldOptions(rule.field, rule.field_type)"
-                  @select="handleValueChange($event, index)"
-                  :type="rule.field === 'assigned_user' ? 'user' : 'team'"
-                />
-              </div>
-
-              <!-- Tag input -->
-              <div v-if="inputType(index) === 'tag'">
-                <TagsInput
-                  :defaultValue="fieldValueAsArray(rule.value)"
-                  @update:modelValue="(value) => handleValueChange(value, index)"
-                  :addOnBlur="true"
-                  :addOnTab="true"
-                  :addOnPaste="true"
-                >
-                  <TagsInputItem
-                    v-for="item in fieldValueAsArray(rule.value)"
-                    :key="item"
-                    :value="item"
-                  >
-                    <TagsInputItemText />
-                    <TagsInputItemDelete />
-                  </TagsInputItem>
-                  <TagsInputInput :placeholder="t('placeholders.selectValue')" />
-                </TagsInput>
-                <p class="text-xs text-muted-foreground mt-1">
-                  {{ $t('globals.messages.pressEnterToSelectAValue') }}
-                </p>
-              </div>
-
-              <!-- Date input -->
-              <Input
-                type="date"
-                :placeholder="t('actions.setValue')"
-                v-if="inputType(index) === 'date'"
-                v-model="rule.value"
-                @update:modelValue="(value) => handleValueChange(value, index)"
-                @keydown.enter.prevent
-              />
-
-              <!-- Boolean / Checkbox input -->
+          <div class="flex items-start gap-3" data-cy="automation-condition">
+            <div class="condition-fields grid min-w-0 flex-1 gap-3">
               <Select
-                v-model="rule.value"
-                @update:modelValue="(value) => handleValueChange(value, index)"
-                v-if="inputType(index) === 'boolean'"
+                v-model="rule.field"
+                @update:modelValue="(value) => handleFieldChange(value, index)"
               >
-                <SelectTrigger>
-                  <SelectValue :placeholder="t('placeholders.selectValue')" />
+                <SelectTrigger :class="FIELD_CLASS">
+                  <SelectValue :placeholder="t('placeholders.selectField')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectItem value="true">{{ $t('globals.messages.true') }}</SelectItem>
-                    <SelectItem value="false">{{ $t('globals.messages.false') }}</SelectItem>
+                    <SelectLabel v-if="!contactsOnly">{{
+                      $t('globals.terms.conversation')
+                    }}</SelectLabel>
+                    <SelectItem v-for="(field, key) in currentFilters" :key="key" :value="key">
+                      {{ field.label }}
+                    </SelectItem>
+                    <SelectLabel v-if="hasContactCustomAttributes">{{
+                      $t('globals.terms.contact')
+                    }}</SelectLabel>
+                    <SelectItem
+                      v-for="(field, key) in contactCustomAttributes"
+                      :key="key"
+                      :value="key"
+                    >
+                      {{ field.label }}
+                    </SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
-            </div>
 
-            <!-- Placeholder for spacing -->
-            <div v-else class="flex-1"></div>
+              <Select
+                v-model="rule.operator"
+                @update:modelValue="(value) => handleOperatorChange(value, index)"
+              >
+                <SelectTrigger :class="FIELD_CLASS">
+                  <SelectValue :placeholder="t('placeholders.selectOperator')" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem
+                      v-for="(op, key) in getFieldOperators(rule.field, rule.field_type)"
+                      :key="key"
+                      :value="op"
+                    >
+                      {{ operatorLabel(op, t) }}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+
+              <div v-if="showInput(index)" :class="FIELD_CLASS">
+                <Input
+                  type="text"
+                  :placeholder="t('actions.setValue')"
+                  v-if="inputType(index) === 'text'"
+                  v-model="rule.value"
+                  @update:modelValue="(value) => handleValueChange(value, index)"
+                  @keydown.enter.prevent
+                />
+
+                <Input
+                  type="number"
+                  :placeholder="t('actions.setValue')"
+                  v-if="inputType(index) === 'number'"
+                  v-model="rule.value"
+                  @update:modelValue="(value) => handleValueChange(value, index)"
+                  @keydown.enter.prevent
+                />
+
+                <div v-if="inputType(index) === 'select'">
+                  <SelectAgentCombobox
+                    v-if="getFieldEntity(rule.field, rule.field_type) === 'agent'"
+                    v-model="rule.value"
+                    @select="handleValueChange($event, index)"
+                  />
+                  <SelectTeamCombobox
+                    v-else-if="getFieldEntity(rule.field, rule.field_type) === 'team'"
+                    v-model="rule.value"
+                    @select="handleValueChange($event, index)"
+                  />
+                  <SelectComboBox
+                    v-else
+                    v-model="rule.value"
+                    :items="getFieldOptions(rule.field, rule.field_type)"
+                    @select="handleValueChange($event, index)"
+                  />
+                </div>
+
+                <div v-if="inputType(index) === 'tag'">
+                  <TagsInput
+                    :defaultValue="fieldValueAsArray(rule.value)"
+                    @update:modelValue="(value) => handleValueChange(value, index)"
+                    :addOnBlur="true"
+                    :addOnTab="true"
+                    :addOnPaste="true"
+                  >
+                    <TagsInputItem
+                      v-for="item in fieldValueAsArray(rule.value)"
+                      :key="item"
+                      :value="item"
+                    >
+                      <TagsInputItemText />
+                      <TagsInputItemDelete type="button" />
+                    </TagsInputItem>
+                    <TagsInputInput :placeholder="t('placeholders.selectValue')" />
+                  </TagsInput>
+                  <p class="text-xs text-muted-foreground mt-1">
+                    {{ $t('globals.messages.pressEnterToSelectAValue') }}
+                  </p>
+                </div>
+
+                <Input
+                  type="date"
+                  :placeholder="t('actions.setValue')"
+                  v-if="inputType(index) === 'date'"
+                  v-model="rule.value"
+                  @update:modelValue="(value) => handleValueChange(value, index)"
+                  @keydown.enter.prevent
+                />
+
+                <Select
+                  v-model="rule.value"
+                  @update:modelValue="(value) => handleValueChange(value, index)"
+                  v-if="inputType(index) === 'boolean'"
+                >
+                  <SelectTrigger>
+                    <SelectValue :placeholder="t('placeholders.selectValue')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="true">{{ $t('globals.messages.true') }}</SelectItem>
+                      <SelectItem value="false">{{ $t('globals.messages.false') }}</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
 
             <!-- Remove condition -->
             <CloseButton :onClose="() => removeCondition(index)" />
           </div>
 
-          <div class="flex items-center space-x-2">
+          <div v-if="showCaseSensitive(index)" class="flex items-center space-x-2">
             <Checkbox
               id="terms"
-              :defaultChecked="rule.case_sensitive_match"
+              :checked="!!rule.case_sensitive_match"
               @update:checked="(value) => handleCaseSensitiveCheck(value, index)"
             />
             <label for="terms"> {{ $t('globals.messages.caseSensitiveMatch') }} </label>
@@ -185,9 +192,7 @@
       </div>
       <div>
         <Button type="button" variant="outline" size="sm" @click.prevent="addCondition">
-          {{
-            $t('actions.addCondition')
-          }}
+          {{ $t('actions.addCondition') }}
         </Button>
       </div>
     </div>
@@ -195,6 +200,8 @@
 </template>
 
 <script setup>
+const FIELD_CLASS = 'min-w-0 w-full'
+
 import { toRefs, computed, watch } from 'vue'
 import { Checkbox } from '@shared-ui/components/ui/checkbox'
 import { RadioGroup, RadioGroupItem } from '@shared-ui/components/ui/radio-group'
@@ -219,11 +226,14 @@ import {
 import { Label } from '@shared-ui/components/ui/label'
 import { Input } from '@shared-ui/components/ui/input'
 import { useI18n } from 'vue-i18n'
-import { useConversationFilters } from '../../../composables/useConversationFilters'
+import { useConversationFilters } from '@/composables/useConversationFilters'
 import SelectComboBox from '@main/components/combobox/SelectCombobox.vue'
+import SelectAgentCombobox from '@main/components/combobox/SelectAgentCombobox.vue'
+import SelectTeamCombobox from '@main/components/combobox/SelectTeamCombobox.vue'
 import { operatorLabel } from '@/constants/filterConfig'
 
 const props = defineProps({
+  contactsOnly: { type: Boolean, default: false },
   ruleGroup: {
     type: Object,
     required: true
@@ -244,12 +254,16 @@ const fieldTypeConstants = {
 }
 const { conversationFilters, newConversationFilters, contactCustomAttributes } =
   useConversationFilters()
+const hasContactCustomAttributes = computed(
+  () => Object.keys(contactCustomAttributes.value).length > 0
+)
 const { ruleGroup } = toRefs(props)
 const emit = defineEmits(['update-group', 'add-condition', 'remove-condition'])
 const { t } = useI18n()
 
 // Computed property to get the correct filters based on type
 const currentFilters = computed(() => {
+  if (props.contactsOnly) return {}
   if (props.type === 'new_conversation') return newConversationFilters.value
   if (props.type === 'conversation_update') return conversationFilters.value
   // previous_* values only exist on conversation update events.
@@ -286,17 +300,15 @@ const handleFieldChange = (value, ruleIndex) => {
 
   ruleGroup.value.rules[ruleIndex].operator = ''
   ruleGroup.value.rules[ruleIndex].value = ''
+  ruleGroup.value.rules[ruleIndex].case_sensitive_match = false
   ruleGroup.value.rules[ruleIndex].field = value
   ruleGroup.value.rules[ruleIndex].field_type = fieldType
   emitUpdate()
 }
 
 const handleOperatorChange = (value, ruleIndex) => {
-  if (['contains', 'not contains'].includes(value)) {
-    ruleGroup.value.rules[ruleIndex].value = []
-  } else {
-    ruleGroup.value.rules[ruleIndex].value = ''
-  }
+  // Every operator stores its value as a comma separated string, multi-value ones included.
+  ruleGroup.value.rules[ruleIndex].value = ''
   ruleGroup.value.rules[ruleIndex].operator = value
   emitUpdate()
 }
@@ -353,6 +365,11 @@ const getFieldOperators = (field, fieldType) => {
   return []
 }
 
+const getFieldEntity = (field, fieldType) => {
+  if ((fieldType || fieldTypeConstants.conversation) !== fieldTypeConstants.conversation) return ''
+  return currentFilters.value[field]?.entity || ''
+}
+
 const getFieldOptions = (field, fieldType) => {
   // Set default field type if not set for backwards compatibility as this field was added later.
   if (!fieldType) {
@@ -392,4 +409,25 @@ const showInput = (index) => {
   const operator = ruleGroup.value.rules[index]?.operator
   return !['set', 'not set'].includes(operator)
 }
+
+const showCaseSensitive = (index) => {
+  const rule = ruleGroup.value.rules[index]
+  const field =
+    rule?.field_type === fieldTypeConstants.contact_custom_attribute
+      ? contactCustomAttributes.value[rule.field]
+      : currentFilters.value[rule?.field]
+  return field?.allowCaseSensitive === true
+}
 </script>
+
+<style scoped>
+.rule-group {
+  container-type: inline-size;
+}
+
+@container (min-width: 36rem) {
+  .condition-fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+</style>

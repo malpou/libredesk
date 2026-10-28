@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -286,4 +287,83 @@ func (s *SessionStore) Bool(r interface{}, err error) (bool, error) {
 		return false, ErrAssertType
 	}
 	return b, nil
+}
+
+// userSessionsKey holds the IDs of a user's sessions, so all of them can be ended at once.
+// Session keys are bare IDs, so the dotted index key can never collide with one.
+func userSessionsKey(userID int) string { return Key("user_sessions", strconv.Itoa(userID)) }
+
+// IndexUserSession adds a session to the user's index. The index lives as long as the user's
+// newest session: each login extends it to a full TTL and never shortens it.
+func (s *SessionStore) IndexUserSession(ctx context.Context, userID int, sessID string) error {
+	return s.st.Mutate(ctx, userSessionsKey(userID), func(cur Entry, found bool) ([]byte, time.Time, error) {
+		ids, err := decodeIDs(cur, found)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		if !slices.Contains(ids, sessID) {
+			ids = append(ids, sessID)
+		}
+		expires := s.st.ExpiresIn(s.ttl)
+		if found && (cur.Expires.IsZero() || cur.Expires.After(expires)) {
+			expires = cur.Expires
+		}
+		b, err := json.Marshal(ids)
+		return b, expires, err
+	})
+}
+
+// UnindexUserSession removes a session from the user's index, deleting the index once empty.
+func (s *SessionStore) UnindexUserSession(ctx context.Context, userID int, sessID string) error {
+	return s.st.Mutate(ctx, userSessionsKey(userID), func(cur Entry, found bool) ([]byte, time.Time, error) {
+		if !found {
+			return nil, time.Time{}, nil
+		}
+		ids, err := decodeIDs(cur, found)
+		if err != nil {
+			return nil, time.Time{}, err
+		}
+		ids = slices.DeleteFunc(ids, func(id string) bool { return id == sessID })
+		if len(ids) == 0 {
+			return nil, time.Time{}, nil
+		}
+		b, err := json.Marshal(ids)
+		return b, cur.Expires, err
+	})
+}
+
+// DestroyUserSessions deletes every indexed session of the user, then the index itself.
+func (s *SessionStore) DestroyUserSessions(ctx context.Context, userID int) error {
+	key := userSessionsKey(userID)
+	e, err := s.st.Get(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("fetching user sessions: %w", err)
+	}
+	ids, err := decodeIDs(e, true)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(ids)+1)
+	for _, id := range ids {
+		keys = append(keys, sessionKey(id))
+	}
+	keys = append(keys, key)
+	if err := s.st.Delete(ctx, keys...); err != nil {
+		return fmt.Errorf("destroying user sessions: %w", err)
+	}
+	return nil
+}
+
+func decodeIDs(e Entry, found bool) ([]string, error) {
+	if !found {
+		return nil, nil
+	}
+	var ids []string
+	if err := json.Unmarshal(e.Value, &ids); err != nil {
+		return nil, fmt.Errorf("decoding user session index: %w", err)
+	}
+	return ids, nil
 }

@@ -1,6 +1,6 @@
 <template>
   <Spinner v-if="formLoading"></Spinner>
-  <form @submit="onSubmit" class="space-y-6 w-full" :class="{ 'opacity-50': formLoading }">
+  <form @submit="onSubmit" class="shared-view-form space-y-6 w-full" :class="{ 'opacity-50': formLoading }">
     <FormField v-slot="{ componentField }" name="name" :validate-on-blur="false">
       <FormItem>
         <FormLabel>{{ t('globals.terms.name') }}</FormLabel>
@@ -23,7 +23,7 @@
       </FormItem>
     </FormField>
 
-    <div class="grid grid-cols-2 gap-4">
+    <FormGrid class="visibility-grid">
       <FormField
         v-slot="{ componentField }"
         name="visibility"
@@ -52,27 +52,27 @@
         </FormItem>
       </FormField>
 
-      <FormField v-if="form.values.visibility === 'team'" v-slot="{ componentField }" name="team_id">
+      <FormField
+        v-if="form.values.visibility === 'team'"
+        v-slot="{ componentField }"
+        name="team_id"
+      >
         <FormItem>
           <FormLabel>{{ t('globals.terms.team') }}</FormLabel>
           <FormControl>
-            <SelectComboBox
-              v-bind="componentField"
-              :items="tStore.options"
-              :placeholder="t('placeholders.selectTeam')"
-              type="team"
-            />
+            <SelectTeamCombobox v-bind="componentField" />
           </FormControl>
           <FormMessage />
         </FormItem>
       </FormField>
-    </div>
+    </FormGrid>
 
     <Button type="submit" :isLoading="isLoading">{{ submitLabel }}</Button>
   </form>
 </template>
 
 <script setup>
+import FormGrid from '@shared-ui/components/FormGrid.vue'
 import { ref, watch, computed, provide } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
@@ -97,8 +97,7 @@ import {
   createRoot
 } from '@/components/filter/filterTree'
 import { useConversationFilters } from '@/composables/useConversationFilters'
-import { useTeamStore } from '@/stores/team'
-import SelectComboBox from '@/components/combobox/SelectCombobox.vue'
+import SelectTeamCombobox from '@/components/combobox/SelectTeamCombobox.vue'
 import {
   Select,
   SelectContent,
@@ -115,7 +114,6 @@ const { t } = useI18n()
 const formLoading = ref(false)
 const validateTick = ref(0)
 provide('filterValidateTick', validateTick)
-const tStore = useTeamStore()
 const props = defineProps({
   initialValues: {
     type: Object,
@@ -149,7 +147,8 @@ const filterFields = computed(() =>
     field,
     type: value.type,
     operators: value.operators,
-    options: value.options ?? []
+    options: value.options ?? [],
+    entity: value.entity
   }))
 )
 
@@ -232,3 +231,19 @@ watch(
   { immediate: true }
 )
 </script>
+
+<style scoped>
+.shared-view-form {
+  container-type: inline-size;
+}
+
+.visibility-grid.form-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 32rem) {
+  .visibility-grid.form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+</style>

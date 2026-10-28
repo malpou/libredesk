@@ -11,6 +11,9 @@ import (
 
 	"github.com/disintegration/imaging"
 	"github.com/gabriel-vasile/mimetype"
+
+	// Registers the WebP decoder with image.Decode, which imaging.Decode uses.
+	_ "golang.org/x/image/webp"
 )
 
 const (
@@ -25,7 +28,7 @@ const (
 )
 
 var (
-	Exts         = []string{"gif", "png", "jpg", "jpeg"}
+	Exts         = []string{"gif", "png", "jpg", "jpeg", "webp"}
 	DefThumbSize = 150
 	ThumbPrefix  = "thumb_"
 )
@@ -44,30 +47,34 @@ func IsImageByContent(r io.ReadSeeker) bool {
 		return false
 	}
 	switch mtype.String() {
-	case "image/png", "image/jpeg", "image/gif":
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
 		return true
 	}
 	return false
 }
 
-// GetDimensions returns the width and height of the image in the provided file.
-// It returns an error if the image cannot be decoded.
+// GetDimensions returns the width and height of the image in the provided file without decoding the bitmap.
 func GetDimensions(r io.Reader) (int, int, error) {
-	img, err := imaging.Decode(r)
+	cfg, _, err := image.DecodeConfig(r)
 	if err != nil {
 		return 0, 0, err
 	}
-
-	bounds := img.Bounds()
-	width := bounds.Max.X
-	height := bounds.Max.Y
-
-	return width, height, nil
+	return cfg.Width, cfg.Height, nil
 }
 
 // CreateThumb generates a thumbnail of the given image file with the specified maximum dimension.
 // The thumbnail's width will be resized to `thumbPxSize` while maintaining the aspect ratio.
-func CreateThumb(thumbPxSize int, r io.Reader) (*bytes.Reader, error) {
+func CreateThumb(thumbPxSize int, r io.ReadSeeker) (*bytes.Reader, error) {
+	cfg, _, err := image.DecodeConfig(r)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > maxDecodePixels/cfg.Height {
+		return nil, fmt.Errorf("invalid or too-large image dimensions %dx%d", cfg.Width, cfg.Height)
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	img, err := imaging.Decode(r, imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, err

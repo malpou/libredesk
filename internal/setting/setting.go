@@ -53,7 +53,8 @@ func New(opts Opts) (*Manager, error) {
 
 	// Fields that need encryption.
 	encryptedFields := map[string]bool{
-		"notification.email.password": true,
+		"notification.email.password":         true,
+		"notification.push.vapid_private_key": true,
 	}
 
 	return &Manager{
@@ -267,7 +268,6 @@ func (m *Manager) decryptSettings(data []byte) ([]byte, error) {
 		if valueStr, ok := settings[key].(string); ok && valueStr != "" {
 			decrypted, err := m.decryptIfNeeded(key, valueStr)
 			if err != nil {
-				m.lo.Error("error decrypting setting", "key", key, "error", err)
 				continue
 			}
 			if decrypted != valueStr {

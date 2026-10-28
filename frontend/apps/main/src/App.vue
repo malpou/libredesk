@@ -1,7 +1,7 @@
 <template>
-  <div class="flex w-full h-dvh text-foreground bg-canvas p-1 md:p-1.5">
+  <div class="flex h-dvh w-full gap-1 bg-canvas p-1 text-foreground">
     <SidebarProvider v-if="!isMobile" style="--sidebar-width: 3rem" class="w-auto z-50">
-      <ShadcnSidebar collapsible="none" class="border border-sidebar-border rounded-lg overflow-hidden">
+      <ShadcnSidebar collapsible="none" class="overflow-hidden rounded-xl">
         <SidebarContent>
           <SidebarGroup>
             <SidebarGroupContent>
@@ -35,14 +35,21 @@
     <div class="flex-1 min-w-0">
       <Sidebar
         :userTeams="userStore.teams"
-        :userViews="userViews"
+        :userViews="viewStore.views"
         :sharedViews="sharedViewStore.sharedViewList"
         @create-view="createView"
         @edit-view="editView"
         @delete-view="deleteView"
-        @create-conversation="() => (openCreateConversationDialog = true)"
+        @create-conversation="openCreateConversation()"
       >
-        <div class="flex flex-col h-full rounded-lg overflow-hidden bg-background">
+        <div
+          class="flex h-full min-h-0 flex-col overflow-hidden rounded-xl"
+          :class="
+            route.path.startsWith('/inboxes') && route.name !== 'search'
+              ? 'bg-canvas'
+              : 'border border-border bg-card'
+          "
+        >
           <ConnectionBanner />
 
           <!-- Show admin banner only in admin routes -->
@@ -52,7 +59,7 @@
           <PageHeader />
 
           <!-- Main content -->
-          <RouterView class="flex-grow" />
+          <RouterView class="min-h-0 flex-1" />
         </div>
         <ViewForm v-model:openDialog="openCreateViewForm" v-model:view="view" />
       </Sidebar>
@@ -63,7 +70,15 @@
   <Command />
 
   <!-- Create conversation dialog -->
-  <CreateConversation v-model="openCreateConversationDialog" v-if="openCreateConversationDialog" />
+  <CreateConversation
+    v-if="openCreateConversationDialog"
+    ref="createConversationRef"
+    v-model="openCreateConversationDialog"
+    :initial-contact="createConversationContact"
+    :start-minimized="createConversationMinimized"
+  />
+
+  <KeyboardShortcutsDialog v-model:open="showShortcuts" />
 </template>
 
 <script setup>
@@ -81,12 +96,15 @@ import { useInboxStore } from './stores/inbox'
 import { useUsersStore } from './stores/users'
 import { useTeamStore } from './stores/team'
 import { useSlaStore } from './stores/sla'
-import { useMacroStore } from './stores/macro'
 import { useSharedViewStore } from './stores/sharedView'
 import { useTagStore } from './stores/tag'
 import { useCustomAttributeStore } from './stores/customAttributes'
 import { useIdleDetection } from './composables/useIdleDetection'
 import { useNotificationStore } from './stores/notification'
+import { useAiPromptStore } from '@main/stores/aiPrompt'
+import { useViewStore } from './stores/view'
+import { useKeyboardShortcutsDialog } from './composables/useKeyboardShortcutsDialog'
+import KeyboardShortcutsDialog from './components/KeyboardShortcutsDialog.vue'
 import { initAudioContext } from '@shared-ui/composables/useNotificationSound'
 import PageHeader from './components/layout/PageHeader.vue'
 import ViewForm from '@/features/view/ViewForm.vue'
@@ -96,6 +114,7 @@ import { toast as sooner } from 'vue-sonner'
 import Sidebar from '@main/components/sidebar/Sidebar.vue'
 import Command from '@/features/command/CommandBox.vue'
 import CreateConversation from '@/features/conversation/CreateConversation.vue'
+import { hasNewConversationDraft } from '@/features/conversation/useNewConversationDraft.js'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import {
@@ -114,6 +133,7 @@ import NotificationBell from '@main/components/sidebar/NotificationBell.vue'
 import PrimaryNavItems from '@main/components/sidebar/PrimaryNavItems.vue'
 import { useIsMobile } from '@shared-ui/composables'
 import api from '@main/api'
+import { usePushNotifications } from '@/composables/usePushNotifications'
 
 const route = useRoute()
 const emitter = useEmitter()
@@ -121,6 +141,8 @@ const isMobile = useIsMobile()
 
 // Remember last inbox path so navigating back from admin/contacts/reports restores it
 const lastInboxPath = useStorage('lastInboxPath', '')
+const userStore = useUserStore()
+const conversationStore = useConversationStore()
 watch(
   () => route.path,
   (path) => {
@@ -130,22 +152,36 @@ watch(
   },
   { immediate: true }
 )
-const userStore = useUserStore()
-const conversationStore = useConversationStore()
+
+// Opening a conversation inside an inbox does not change the inbox path used here.
+watch(
+  () => route.path.replace(/\/conversation\/.*$/, ''),
+  (inboxPath) => {
+    if (inboxPath.startsWith('/inboxes') && inboxPath !== '/inboxes/search') {
+      conversationStore.fetchSidebarCounts()
+    }
+  }
+)
 const usersStore = useUsersStore()
 const teamStore = useTeamStore()
 const inboxStore = useInboxStore()
 const slaStore = useSlaStore()
-const macroStore = useMacroStore()
 const sharedViewStore = useSharedViewStore()
 const tagStore = useTagStore()
 const customAttributeStore = useCustomAttributeStore()
-const userViews = ref([])
+const viewStore = useViewStore()
+const { open: showShortcuts } = useKeyboardShortcutsDialog()
 const view = ref({})
 const openCreateViewForm = ref(false)
-const openCreateConversationDialog = ref(false)
+const hasSavedDraft = hasNewConversationDraft(window.localStorage)
+const openCreateConversationDialog = ref(hasSavedDraft)
+const createConversationContact = ref(null)
+const createConversationMinimized = ref(hasSavedDraft)
+const createConversationRef = ref(null)
 const { t } = useI18n()
 const notificationStore = useNotificationStore()
+const aiPromptStore = useAiPromptStore()
+const pushNotifications = usePushNotifications()
 
 // Update browser tab title with unread notification count.
 // Watch both unreadCount and route so the prefix is preserved after navigation.
@@ -169,8 +205,17 @@ document.addEventListener('touchstart', unlockAudio)
 onMounted(() => {
   initToaster()
   listenViewRefresh()
+  emitter.on(EMITTER_EVENTS.OPEN_CREATE_CONVERSATION, openCreateConversation)
+  emitter.on(EMITTER_EVENTS.OPEN_VIEW_FORM, createView)
   initStores()
 })
+
+const openCreateConversation = ({ contact = null } = {}) => {
+  createConversationContact.value = contact
+  createConversationMinimized.value = false
+  createConversationRef.value?.restore()
+  openCreateConversationDialog.value = true
+}
 
 // Initialize data stores
 const initStores = async () => {
@@ -178,7 +223,7 @@ const initStores = async () => {
     await userStore.getCurrentUser()
   }
   await Promise.allSettled([
-    getUserViews(),
+    viewStore.fetchViews(),
     sharedViewStore.loadSharedViews(),
     conversationStore.fetchStatuses(),
     conversationStore.fetchPriorities(),
@@ -187,10 +232,16 @@ const initStores = async () => {
     teamStore.fetchTeams(),
     inboxStore.fetchInboxes(),
     slaStore.fetchSlas(),
-    macroStore.loadMacros(),
     tagStore.fetchTags(),
-    customAttributeStore.fetchCustomAttributes()
+    customAttributeStore.fetchCustomAttributes(),
+    aiPromptStore.fetchPrompts(),
+    refreshPushSubscription()
   ])
+}
+
+const refreshPushSubscription = async () => {
+  const { data } = await api.getNotificationPreferences()
+  await pushNotifications.refresh(data.data.vapid_public_key, data.data.push_endpoints)
 }
 
 const createView = () => {
@@ -210,18 +261,6 @@ const deleteView = async (view) => {
     emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
       description: t('globals.messages.deletedSuccessfully')
     })
-  } catch (err) {
-    emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
-      variant: 'destructive',
-      description: handleHTTPError(err).message
-    })
-  }
-}
-
-const getUserViews = async () => {
-  try {
-    const response = await api.getCurrentUserViews()
-    userViews.value = response.data.data
   } catch (err) {
     emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
       variant: 'destructive',
@@ -253,10 +292,12 @@ const refreshViews = async (data) => {
   openCreateViewForm.value = false
   // TODO: move model to constants.
   if (data?.model === 'view') {
-    await getUserViews()
+    await viewStore.fetchViews()
+    if (data.id) conversationStore.fetchViewCount(data.id)
+    else conversationStore.fetchSidebarCounts({ force: true })
     const openID = route.params.viewID
     // If the open view was edited its filters may have changed, refetch.
-    if (openID && userViews.value.some((v) => String(v.id) === String(openID))) {
+    if (openID && viewStore.views.some((v) => String(v.id) === String(openID))) {
       // Reset list and fetch conversations.
       conversationStore.resetConversations()
       conversationStore.fetchConversationsList(true, CONVERSATION_LIST_TYPE.VIEW, 0, [], openID)

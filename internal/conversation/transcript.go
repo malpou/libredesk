@@ -27,14 +27,19 @@ func (m *Manager) BuildTranscript(conversation models.Conversation, messages []m
 	fmt.Fprintf(&b, "%s: %s\n\n", m.i18n.T("globals.terms.downloadedAt"), downloadedAt.UTC().Format(transcriptTimeFormat))
 	b.WriteString(transcriptSeparator + "\n")
 
-	for _, message := range messages {
+	label := m.i18n.Tc("globals.terms.articleReference", 2 /* n */)
+	references := m.lookupArticleReferences(messageMetas(messages)...)
+	for i, message := range messages {
 		content := message.TextContent
 		if content == "" {
 			content = stringutil.HTML2Text(message.Content)
 		}
+		if len(references[i]) > 0 {
+			content += "\n\n" + stringutil.HTML2TextMarkdownLinks(articleReferencesHTML(references[i], label))
+		}
 		fmt.Fprintf(&b, "\n[%s] %s (%s):\n%s\n",
 			message.CreatedAt.UTC().Format(transcriptTimeFormat),
-			message.Author.FullName(),
+			transcriptAuthor(message),
 			m.senderTypeLabel(message.SenderType),
 			content,
 		)
@@ -57,4 +62,11 @@ func (m *Manager) senderTypeLabel(senderType string) string {
 		return m.i18n.T("globals.terms.contact")
 	}
 	return senderType
+}
+
+func transcriptAuthor(message models.Message) string {
+	if sender := proactiveSender(message.Meta); sender != "" {
+		return sender
+	}
+	return message.Author.FullName()
 }

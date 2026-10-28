@@ -1,4 +1,30 @@
 <template>
+  <AlertDialog
+    :open="!!pendingToolApproval && pendingToolConversationUUID === currentConversationUUID"
+  >
+    <AlertDialogContent>
+      <AlertDialogHeader>
+        <AlertDialogTitle>{{ $t('ai.toolApprovalTitle') }}</AlertDialogTitle>
+        <AlertDialogDescription as="div">
+          <ToolApprovalDetails v-if="pendingToolApproval" :approval="pendingToolApproval" />
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <Button
+          type="button"
+          variant="outline"
+          :disabled="isGenerating"
+          @click="resolveGenerateToolApproval(false)"
+        >
+          {{ $t('globals.messages.reject') }}
+        </Button>
+        <Button type="button" :disabled="isGenerating" @click="resolveGenerateToolApproval(true)">
+          {{ $t('globals.messages.approveAndRun') }}
+        </Button>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
+
   <AlertDialog :open="showContactEmailWarning" @update:open="showContactEmailWarning = $event">
     <AlertDialogContent>
       <AlertDialogHeader>
@@ -37,7 +63,7 @@
     </AlertDialogContent>
   </AlertDialog>
 
-  <div class="text-foreground bg-background">
+  <div class="text-foreground">
     <!-- Fullscreen editor -->
     <Dialog :open="isEditorFullscreen" @update:open="isEditorFullscreen = false">
       <DialogContent
@@ -53,8 +79,8 @@
       >
         <ReplyBoxContent
           v-if="isEditorFullscreen"
+          ref="fullscreenContentRef"
           :isFullscreen="true"
-          :aiPrompts="aiPrompts"
           :isSending="isSending"
           :isDraftLoading="isDraftLoading"
           :uploadingFiles="uploadingFiles"
@@ -64,8 +90,11 @@
           v-model:to="to"
           v-model:cc="cc"
           v-model:bcc="bcc"
+          :sendFrom="sendFrom"
+          @update:sendFrom="pickSender"
           v-model:emailErrors="emailErrors"
           v-model:messageType="messageType"
+          v-model:showCc="showCc"
           v-model:showBcc="showBcc"
           v-model:mentions="mentions"
           @toggleFullscreen="isEditorFullscreen = !isEditorFullscreen"
@@ -74,26 +103,32 @@
           @fileUpload="handleFileUpload"
           @fileDelete="handleFileDelete"
           @filesDropped="uploadFiles"
-          @aiPromptSelected="handleAiPromptSelected"
+          @aiGenerationChange="isGenerating = $event"
           :isGenerating="isGenerating"
+          :canSendReply="canSendReply"
+          :canSendPrivateNote="canSendPrivateNote"
           @generateReply="handleGenerateReply"
           class="h-full flex-grow"
         />
       </DialogContent>
     </Dialog>
 
-    <div v-if="isCramped && !isEditorFullscreen" class="p-2">
+    <div v-if="isCollapsed && !isEditorFullscreen" class="p-2">
       <Button
         type="button"
         variant="outline"
         class="w-full h-11 justify-start font-normal min-w-0"
         :class="{ '!bg-private': messageType === 'private_note', 'ai-generating': isGenerating }"
-        @click="isEditorFullscreen = true"
+        @click="expandComposer"
       >
         <Pencil class="shrink-0 text-muted-foreground" />
         <span v-if="draftPreview" class="truncate">{{ draftPreview }}</span>
         <span v-else class="truncate text-muted-foreground">
-          {{ messageType === 'private_note' ? $t('globals.terms.privateNote') : $t('globals.terms.reply') }}
+          {{
+            messageType === 'private_note'
+              ? $t('globals.terms.privateNote')
+              : $t('globals.terms.reply')
+          }}
         </span>
         <span
           v-if="attachmentCount"
@@ -107,14 +142,13 @@
 
     <!-- Main Editor non-fullscreen -->
     <div
-      class="bg-background text-card-foreground box m-2 px-2 pt-2 flex flex-col relative"
+      class="bg-card text-card-foreground box m-2 px-2 pt-2 flex flex-col relative"
       :class="{ '!bg-private': messageType === 'private_note', 'ai-generating': isGenerating }"
-      v-if="!isCramped && !isEditorFullscreen"
+      v-if="!isCollapsed && !isEditorFullscreen"
     >
       <ReplyBoxContent
         ref="replyBoxContentRef"
         :isFullscreen="false"
-        :aiPrompts="aiPrompts"
         :isSending="isSending"
         :isDraftLoading="isDraftLoading"
         :uploadingFiles="uploadingFiles"
@@ -124,18 +158,24 @@
         v-model:to="to"
         v-model:cc="cc"
         v-model:bcc="bcc"
+        :sendFrom="sendFrom"
+        @update:sendFrom="pickSender"
         v-model:emailErrors="emailErrors"
         v-model:messageType="messageType"
+        v-model:showCc="showCc"
         v-model:showBcc="showBcc"
         v-model:mentions="mentions"
         @toggleFullscreen="isEditorFullscreen = !isEditorFullscreen"
+        @minimize="toggleMinimize"
         @send="processSend"
         @sendAndSetStatus="processSendAndSetStatus"
         @fileUpload="handleFileUpload"
         @fileDelete="handleFileDelete"
         @filesDropped="uploadFiles"
-        @aiPromptSelected="handleAiPromptSelected"
+        @aiGenerationChange="isGenerating = $event"
         :isGenerating="isGenerating"
+        :canSendReply="canSendReply"
+        :canSendPrivateNote="canSendPrivateNote"
         @generateReply="handleGenerateReply"
       />
     </div>
@@ -143,17 +183,19 @@
 </template>
 
 <script setup>
-import { ref, watch, computed, toRaw, onMounted, onUnmounted } from 'vue'
+import { ref, watch, computed, toRaw, nextTick, onMounted, onUnmounted } from 'vue'
+import { useStorage } from '@vueuse/core'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
+import { getTextFromHTML } from '@shared-ui/utils/string'
 import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
 import { MACRO_CONTEXT } from '@main/constants/conversation'
+import { WHATSAPP_CHANNEL, isWhatsAppWindowOpen } from '@main/features/conversation/whatsappTemplate'
 import { useUserStore } from '@main/stores/user'
 import { useDraftManager } from '@main/composables/useDraftManager'
 import api from '@main/api'
 import { useI18n } from 'vue-i18n'
 import { useConversationStore } from '@main/stores/conversation'
 import { useInboxStore } from '@main/stores/inbox'
-import { useAiPromptStore } from '@main/stores/aiPrompt'
 import { useNotificationStore } from '@main/stores/notification'
 import {
   AlertDialog,
@@ -167,6 +209,7 @@ import {
 } from '@shared-ui/components/ui/alert-dialog'
 import { Dialog, DialogContent } from '@shared-ui/components/ui/dialog'
 import { Button } from '@shared-ui/components/ui/button'
+import ToolApprovalDetails from '@/features/conversation/ToolApprovalDetails.vue'
 import { Pencil, Paperclip } from 'lucide-vue-next'
 import { useVisualViewportHeight } from '@main/composables/useVisualViewportHeight'
 import { useIsComposerCramped } from '@main/composables/useIsComposerCramped'
@@ -175,6 +218,7 @@ import { useFileUpload } from '@main/composables/useFileUpload'
 import { hasInlineImage, hasPendingInlineUpload } from '@main/composables/useInlineImageUpload'
 import ReplyBoxContent from '@/features/conversation/ReplyBoxContent.vue'
 import { UserTypeAgent } from '@/constants/user'
+import { permissions as perms } from '@main/constants/permissions.js'
 
 const { t } = useI18n()
 const conversationStore = useConversationStore()
@@ -185,12 +229,22 @@ const userStore = useUserStore()
 const isCramped = useIsComposerCramped()
 useVisualViewportHeight()
 
+const canSendReply = computed(() => userStore.can(perms.MESSAGES_WRITE))
+const canSendPrivateNote = computed(() => userStore.can(perms.MESSAGES_WRITE_PRIVATE))
+const defaultMessageType = computed(() => (canSendReply.value ? 'reply' : 'private_note'))
+const isAllowedMessageType = (type) =>
+  (type === 'reply' && canSendReply.value) || (type === 'private_note' && canSendPrivateNote.value)
+const resolveAllowedDraftType = (uuid) => {
+  const type = conversationStore.resolveDraftType(uuid)
+  return isAllowedMessageType(type) ? type : defaultMessageType.value
+}
+
 // Setup file upload composable
 const {
   uploadingFiles,
-  handleFileUpload,
+  handleFileUpload: _handleFileUpload,
   handleFileDelete,
-  uploadFiles,
+  uploadFiles: _uploadFiles,
   mediaFiles,
   clearMediaFiles,
   setMediaFiles
@@ -198,21 +252,75 @@ const {
   linkedModel: 'messages'
 })
 
-const messageType = ref('reply')
+// Meta's per-type upload caps, less the 2% headroom the backend applies. Mirrors maxMediaBytes in internal/inbox/channel/whatsapp.
+const WA_MAX_FILE_MB = { image: 5 * 0.98, video: 16 * 0.98, audio: 16 * 0.98, document: 100 * 0.98 }
+
+function waMediaType(contentType = '') {
+  if (['image/jpeg', 'image/png'].includes(contentType)) return 'image'
+  if (['video/mp4', 'video/3gpp', 'video/3gp'].includes(contentType)) return 'video'
+  if (contentType.startsWith('audio/')) return 'audio'
+  return 'document'
+}
+
+// WhatsApp takes one attachment per message, so a multi-file reply is sent as several messages, the caption riding the first.
+function buildWhatsAppReplyParts(content, files) {
+  const parts = []
+  let caption = content
+  if (hasTextContent.value && waMediaType(files[0].content_type) === 'audio') {
+    parts.push({ content: caption, attachments: [] })
+    caption = ''
+  }
+  files.forEach((file, i) => parts.push({ content: i === 0 ? caption : '', attachments: [file] }))
+  return parts
+}
+
+function validateWhatsAppFiles(files) {
+  if (messageType.value === 'private_note') return files
+  if (conversationStore.current?.inbox_channel !== WHATSAPP_CHANNEL) return files
+  const valid = []
+  for (const file of files) {
+    const maxMB = WA_MAX_FILE_MB[waMediaType(file.type)]
+    if (file.size > maxMB * 1024 * 1024) {
+      emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
+        variant: 'destructive',
+        description: t('conversation.whatsapp.fileSizeExceeded', {
+          name: file.name,
+          size: Math.floor(maxMB)
+        })
+      })
+    } else {
+      valid.push(file)
+    }
+  }
+  return valid
+}
+
+const handleFileUpload = (event) => {
+  const files = validateWhatsAppFiles(Array.from(event.target.files))
+  if (files.length) _handleFileUpload({ target: { files } })
+}
+
+const uploadFiles = (files) => {
+  const valid = validateWhatsAppFiles(Array.from(files))
+  if (valid.length) _uploadFiles(valid)
+}
+
+const messageType = defineModel('messageType', { default: 'reply' })
 const currentConversationUUID = computed(() => conversationStore.current?.uuid || null)
 watch(
   currentConversationUUID,
   async (uuid, prevUuid) => {
     if (prevUuid) conversationStore.setSelectedDraftType(prevUuid, messageType.value)
     if (!uuid) {
-      messageType.value = 'reply'
+      messageType.value = defaultMessageType.value
       return
     }
-    messageType.value = conversationStore.resolveDraftType(uuid)
+    const initialType = resolveAllowedDraftType(uuid)
+    messageType.value = initialType
     // Prefetch may still be in flight on first load; re-resolve once drafts land.
     await conversationStore.draftsReady
-    if (uuid !== currentConversationUUID.value) return
-    messageType.value = conversationStore.resolveDraftType(uuid)
+    if (uuid !== currentConversationUUID.value || messageType.value !== initialType) return
+    messageType.value = resolveAllowedDraftType(uuid)
   },
   { immediate: true }
 )
@@ -230,32 +338,50 @@ const {
 
 // Rest of existing state
 const isEditorFullscreen = ref(false)
+const isMinimized = useStorage('replyBoxMinimized', false)
 const isSending = ref(false)
 const isGenerating = ref(false)
 const to = ref('')
 const cc = ref('')
 const bcc = ref('')
+const sendFrom = ref('')
+const senderPickedFor = ref(null)
+const showCc = ref(false)
 const showBcc = ref(false)
 const emailErrors = ref([])
-const aiPromptStore = useAiPromptStore()
-const aiPrompts = computed(() => aiPromptStore.prompts)
 const replyBoxContentRef = ref(null)
+const fullscreenContentRef = ref(null)
+const activeContentRef = () =>
+  isEditorFullscreen.value ? fullscreenContentRef.value : replyBoxContentRef.value
 const showContactEmailWarning = ref(false)
 const showMissingTagsWarning = ref(false)
+const pendingToolApproval = ref(null)
+const pendingToolConversationUUID = ref('')
 const deferredStatus = ref(null)
 const mentions = ref([])
 
-aiPromptStore.fetchPrompts()
+watch(currentConversationUUID, (uuid) => {
+  if (pendingToolApproval.value && pendingToolConversationUUID.value !== uuid) {
+    pendingToolApproval.value = null
+    pendingToolConversationUUID.value = ''
+  }
+})
 
 const runAiGeneration = async (requestFn) => {
-  if (isGenerating.value) return
+  if (isGenerating.value || pendingToolApproval.value) return
   const uuid = currentConversationUUID.value
   if (!uuid) return
   isGenerating.value = true
   try {
     const resp = await requestFn(uuid)
     if (uuid !== currentConversationUUID.value) return
-    htmlContent.value = resp.data.data || ''
+    const result = resp.data.data
+    if (result.status === 'approval_required') {
+      pendingToolApproval.value = result.approval
+      pendingToolConversationUUID.value = uuid
+      return
+    }
+    htmlContent.value = result.content || ''
   } catch (error) {
     emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
       variant: 'destructive',
@@ -266,28 +392,92 @@ const runAiGeneration = async (requestFn) => {
   }
 }
 
-const handleAiPromptSelected = (key) =>
-  runAiGeneration(() => api.aiCompletion({ prompt_key: key, content: htmlContent.value }))
-
 const handleGenerateReply = () =>
   runAiGeneration((uuid) =>
     api.aiGenerateReply({ conversation_uuid: uuid, instruction: textContent.value })
   )
 
+const resolveGenerateToolApproval = async (approved) => {
+  const approval = pendingToolApproval.value
+  const uuid = pendingToolConversationUUID.value
+  if (!approval || isGenerating.value) return
+  isGenerating.value = true
+  try {
+    const resp = approved
+      ? await api.approveAIToolRun(approval.run_id)
+      : await api.declineAIToolRun(approval.run_id)
+    const result = resp.data.data
+    if (uuid !== currentConversationUUID.value) return
+    if (result.status === 'approval_required') {
+      pendingToolApproval.value = result.approval
+      pendingToolConversationUUID.value = uuid
+      return
+    }
+    pendingToolApproval.value = null
+    pendingToolConversationUUID.value = ''
+    htmlContent.value = result.content || ''
+  } catch (error) {
+    if ([403, 404, 409].includes(error?.response?.status)) {
+      pendingToolApproval.value = null
+      pendingToolConversationUUID.value = ''
+    }
+    emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
+      variant: 'destructive',
+      description: handleHTTPError(error).message
+    })
+  } finally {
+    isGenerating.value = false
+  }
+}
+
 // Copilot's "Insert into reply" replaces the draft with its answer (already HTML from the panel),
 // forcing reply mode so a private note in progress does not silently receive customer-facing text.
 const handleCopilotInsertReply = (html) => {
-  if (!html) return
+  if (!html || !canSendReply.value) return
   if (messageType.value === 'private_note') messageType.value = 'reply'
+  isMinimized.value = false
   htmlContent.value = html
+}
+
+const setMessageTypeFromPalette = (type) => {
+  if (isGenerating.value || !isAllowedMessageType(type)) return
+  messageType.value = type
+}
+
+const focusFromPalette = () => {
+  // The cramped layout renders no editor until the fullscreen dialog opens.
+  if (isCramped.value && !isEditorFullscreen.value) {
+    isEditorFullscreen.value = true
+    nextTick(() => fullscreenContentRef.value?.focus())
+    return
+  }
+  if (isMinimized.value) {
+    isMinimized.value = false
+    nextTick(() => replyBoxContentRef.value?.focus())
+    return
+  }
+  activeContentRef()?.focus()
+}
+
+const toggleMinimize = () => {
+  // Unmounting the editor mid AI rewrite drops the result and leaves isGenerating stuck.
+  if (isCramped.value || isEditorFullscreen.value || isGenerating.value) return
+  isMinimized.value = !isMinimized.value
+  if (!isMinimized.value) nextTick(() => replyBoxContentRef.value?.focus())
 }
 
 onMounted(() => {
   emitter.on(EMITTER_EVENTS.COPILOT_INSERT_REPLY, handleCopilotInsertReply)
+  emitter.on(EMITTER_EVENTS.REPLY_BOX_SET_TYPE, setMessageTypeFromPalette)
+  emitter.on(EMITTER_EVENTS.REPLY_BOX_FOCUS, focusFromPalette)
+  emitter.on(EMITTER_EVENTS.REPLY_BOX_TOGGLE_MINIMIZE, toggleMinimize)
 })
 
 onUnmounted(() => {
   emitter.off(EMITTER_EVENTS.COPILOT_INSERT_REPLY, handleCopilotInsertReply)
+  emitter.off(EMITTER_EVENTS.REPLY_BOX_SET_TYPE, setMessageTypeFromPalette)
+  emitter.off(EMITTER_EVENTS.REPLY_BOX_FOCUS, focusFromPalette)
+  emitter.off(EMITTER_EVENTS.REPLY_BOX_TOGGLE_MINIMIZE, toggleMinimize)
 })
 
 /**
@@ -297,11 +487,23 @@ const hasTextContent = computed(() => {
   return textContent.value.trim().length > 0
 })
 
-const draftPreview = computed(() => textContent.value.trim())
+// textContent stays empty while the composer is collapsed, no editor is mounted to fill it.
+const draftPreview = computed(() => textContent.value.trim() || getTextFromHTML(htmlContent.value))
+
+const isCollapsed = computed(() => isCramped.value || isMinimized.value)
+
+const expandComposer = () => {
+  if (isCramped.value) isEditorFullscreen.value = true
+  else isMinimized.value = false
+}
 
 const attachmentCount = computed(() => mediaFiles.value.length + uploadingFiles.value.length)
 
-const processSend = async (skipContactEmailCheck = false, skipMissingTagsCheck = false, statusToSet = null) => {
+const processSend = async (
+  skipContactEmailCheck = false,
+  skipMissingTagsCheck = false,
+  statusToSet = null
+) => {
   let hasMessageSendingErrored = false
   isEditorFullscreen.value = false
 
@@ -309,11 +511,15 @@ const processSend = async (skipContactEmailCheck = false, skipMissingTagsCheck =
   if (hasPendingInlineUpload(html)) return
   const hasContent = hasTextContent.value || hasInlineImage(html) || mediaFiles.value.length > 0
   const convUUID = conversationStore.current.uuid
+  // The agent can open another conversation while the send is in flight, and the editor then holds that conversation's draft.
+  const isConversationStillOpen = () => conversationStore.current?.uuid === convUUID
+  const macroID = conversationStore.getMacro(MACRO_CONTEXT.REPLY)?.id
+  const macroActions = conversationStore.getMacro(MACRO_CONTEXT.REPLY)?.actions || []
   const isPrivate = messageType.value === 'private_note'
 
-  const currentInbox = inboxStore.inboxes.find(
-    (i) => i.id === conversationStore.current.inbox_id
-  )
+  if ((isPrivate && !canSendPrivateNote.value) || (!isPrivate && !canSendReply.value)) return
+
+  const currentInbox = inboxStore.inboxes.find((i) => i.id === conversationStore.current.inbox_id)
   if (
     !isPrivate &&
     !skipMissingTagsCheck &&
@@ -323,6 +529,16 @@ const processSend = async (skipContactEmailCheck = false, skipMissingTagsCheck =
     deferredStatus.value = statusToSet
     showMissingTagsWarning.value = true
     return
+  }
+
+  if (!isPrivate && conversationStore.current.inbox_channel === WHATSAPP_CHANNEL) {
+    if (!isWhatsAppWindowOpen(conversationStore.current)) {
+      emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
+        variant: 'destructive',
+        description: t('conversation.whatsapp.error.windowClosed')
+      })
+      return
+    }
   }
 
   if (!isPrivate && conversationStore.current.inbox_channel === 'email') {
@@ -353,7 +569,7 @@ const processSend = async (skipContactEmailCheck = false, skipMissingTagsCheck =
       }
     }
   }
-  let tempUUID = null
+  let tempUUIDs = []
 
   // Add pending message to cache for instant display.
   if (hasContent) {
@@ -390,56 +606,74 @@ const processSend = async (skipContactEmailCheck = false, skipMissingTagsCheck =
     if (parsedTo.length) meta.to = parsedTo
     if (parsedCC.length) meta.cc = parsedCC
     if (parsedBCC.length) meta.bcc = parsedBCC
+    if (!isPrivate && sendFrom.value) meta.send_from = sendFrom.value
 
-    tempUUID = conversationStore.addPendingMessage(
-      convUUID,
-      savedContent,
-      isPrivate,
-      author,
-      mediaFiles.value,
-      textContent.value,
-      meta
+    const isWhatsAppReply =
+      !isPrivate && conversationStore.current.inbox_channel === WHATSAPP_CHANNEL
+    const parts =
+      isWhatsAppReply && mediaFiles.value.length
+        ? buildWhatsAppReplyParts(savedContent, mediaFiles.value)
+        : [{ content: savedContent, attachments: mediaFiles.value }]
+
+    tempUUIDs = parts.map((part, i) =>
+      conversationStore.addPendingMessage(
+        convUUID,
+        part.content,
+        isPrivate,
+        author,
+        part.attachments,
+        i === 0 ? textContent.value : '',
+        meta
+      )
     )
 
     // Clear editor immediately.
     htmlContent.value = ''
 
-    try {
-      isSending.value = true
-      const response = await api.sendMessage(convUUID, {
-        sender_type: UserTypeAgent,
-        private: isPrivate,
-        message: savedContent,
-        attachments: mediaFiles.value.map((file) => file.id),
-        mentions: isPrivate ? mentions.value : [],
-        cc: parsedCC,
-        bcc: parsedBCC,
-        to: parsedTo,
-        echo_id: isPrivate ? '' : tempUUID
-      })
+    isSending.value = true
+    for (const [i, part] of parts.entries()) {
+      try {
+        const response = await api.sendMessage(convUUID, {
+          sender_type: UserTypeAgent,
+          private: isPrivate,
+          message: part.content,
+          attachments: part.attachments.map((file) => file.id),
+          mentions: isPrivate ? mentions.value : [],
+          cc: parsedCC,
+          bcc: parsedBCC,
+          to: parsedTo,
+          echo_id: isPrivate ? '' : tempUUIDs[i],
+          send_from: isPrivate ? '' : sendFrom.value
+        })
 
-      // Private notes are sent immediately so replace immediately.
-      if (isPrivate && response?.data?.data) {
-        conversationStore.replacePendingMessage(convUUID, tempUUID, response.data.data)
+        if (isPrivate && response?.data?.data) {
+          conversationStore.replacePendingMessage(convUUID, tempUUIDs[i], response.data.data)
+        }
+      } catch (error) {
+        hasMessageSendingErrored = true
+        // Drop the bubbles for everything still unsent. Parts already accepted stay in the timeline.
+        tempUUIDs.slice(i).forEach((uuid) => conversationStore.removePendingMessage(convUUID, uuid))
+        // Already-accepted attachments must not be resent on retry.
+        const sentIDs = new Set(parts.slice(0, i).flatMap((p) => p.attachments.map((f) => f.id)))
+        if (isConversationStillOpen()) {
+          if (sentIDs.size) setMediaFiles(mediaFiles.value.filter((f) => !sentIDs.has(f.id)))
+          if (i === 0) htmlContent.value = savedContent
+        }
+        emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
+          variant: 'destructive',
+          description: handleHTTPError(error).message
+        })
+        break
       }
+    }
 
+    if (!hasMessageSendingErrored) {
       notificationStore.markAssignmentAsReadForConversation(convUUID)
-    } catch (error) {
-      hasMessageSendingErrored = true
-      // Remove pending message and restore editor content.
-      conversationStore.removePendingMessage(convUUID, tempUUID)
-      htmlContent.value = savedContent
-      emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
-        variant: 'destructive',
-        description: handleHTTPError(error).message
-      })
     }
   }
 
   // Apply macro actions if any.
   if (!hasMessageSendingErrored) {
-    const macroID = conversationStore.getMacro(MACRO_CONTEXT.REPLY)?.id
-    const macroActions = conversationStore.getMacro(MACRO_CONTEXT.REPLY)?.actions || []
     if (macroID > 0) {
       try {
         await api.applyMacro(convUUID, macroID, macroActions)
@@ -455,11 +689,13 @@ const processSend = async (skipContactEmailCheck = false, skipMissingTagsCheck =
   // Clear state on success.
   if (!hasMessageSendingErrored) {
     clearDraft(convUUID, isPrivate ? 'private_note' : 'reply')
-    conversationStore.resetMacro(MACRO_CONTEXT.REPLY)
-    clearMediaFiles()
-    emailErrors.value = []
-    mentions.value = []
-    if (statusToSet) conversationStore.updateStatus(statusToSet)
+    if (isConversationStillOpen()) {
+      conversationStore.resetMacro(MACRO_CONTEXT.REPLY)
+      clearMediaFiles()
+      emailErrors.value = []
+      mentions.value = []
+    }
+    if (statusToSet) conversationStore.updateStatus(convUUID, statusToSet)
   }
   isSending.value = false
 }
@@ -483,13 +719,33 @@ watch(
   { deep: true }
 )
 
+const pickSender = (value) => {
+  sendFrom.value = value
+  senderPickedFor.value = currentConversationUUID.value
+}
+
+// Keep the agent's own sender pick while it is still allowed, since currentFrom changes whenever a new message arrives.
+watch(
+  [currentConversationUUID, () => conversationStore.currentFrom],
+  ([uuid, value], [previousUUID] = []) => {
+    if (uuid !== previousUUID) senderPickedFor.value = null
+    const picked =
+      senderPickedFor.value === uuid &&
+      conversationStore.currentFromOptions.includes(sendFrom.value)
+    if (!picked) sendFrom.value = value || ''
+  },
+  { immediate: true }
+)
+
 // Reset first so a loaded draft never inherits the previous conversation's macro (drafts store no message_content).
 watch(
   [loadedMacroID, loadedMacroActions],
   ([id, actions]) => {
     conversationStore.resetMacro(MACRO_CONTEXT.REPLY)
-    if (id > 0) conversationStore.setMacro({ id, actions: [...toRaw(actions)] }, MACRO_CONTEXT.REPLY)
-    else if (actions.length) conversationStore.setMacroActions([...toRaw(actions)], MACRO_CONTEXT.REPLY)
+    if (id > 0)
+      conversationStore.setMacro({ id, actions: [...toRaw(actions)] }, MACRO_CONTEXT.REPLY)
+    else if (actions.length)
+      conversationStore.setMacroActions([...toRaw(actions)], MACRO_CONTEXT.REPLY)
   },
   { deep: true }
 )
@@ -510,6 +766,7 @@ watch(
   () => conversationStore.currentCC,
   (newVal) => {
     cc.value = newVal?.join(', ') || ''
+    showCc.value = cc.value.length > 0
   },
   { deep: true, immediate: true }
 )
@@ -525,79 +782,9 @@ watch(
 watch(
   () => conversationStore.currentBCC,
   (newVal) => {
-    const newBcc = newVal?.join(', ') || ''
-    bcc.value = newBcc
-    // Only show BCC field if it has content
-    if (newBcc.length > 0) {
-      showBcc.value = true
-    }
+    bcc.value = newVal?.join(', ') || ''
+    showBcc.value = bcc.value.length > 0
   },
   { deep: true, immediate: true }
 )
-
-// Media files and macro state are restored per draft by the draft manager; resetting here would race ahead of the save and drop them.
-watch(
-  () => conversationStore.current?.uuid,
-  () => {
-    setTimeout(() => {
-      replyBoxContentRef.value?.focus()
-    }, 100)
-  }
-)
 </script>
-
-<style scoped>
-/* While the AI drafts a reply, a point of light orbits the reply box: a bright
-   comet head that fades to a transparent tail, with its glow travelling along. */
-@property --ai-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
-.ai-generating {
-  box-shadow: 0 6px 22px -10px hsl(var(--primary) / 0.28);
-}
-
-.ai-generating::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.5px;
-  background: conic-gradient(
-    from var(--ai-angle),
-    hsl(var(--primary)) 0deg,
-    hsl(var(--primary) / 0) 90deg,
-    hsl(var(--primary) / 0) 180deg,
-    hsl(var(--primary)) 180deg,
-    hsl(var(--primary) / 0) 270deg,
-    hsl(var(--primary) / 0) 360deg
-  );
-  filter: drop-shadow(0 0 5px hsl(var(--primary) / 0.5));
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  animation: ai-border-spin 2.4s linear infinite;
-  pointer-events: none;
-  z-index: 20;
-}
-
-@keyframes ai-border-spin {
-  to {
-    --ai-angle: 360deg;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* Steady even glow so the active state stays legible without motion. */
-  .ai-generating {
-    box-shadow: 0 0 0 1.5px hsl(var(--primary) / 0.4);
-  }
-  .ai-generating::after {
-    display: none;
-  }
-}
-</style>

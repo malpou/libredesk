@@ -1,37 +1,25 @@
 <template>
-  <form @submit="onSubmit" novalidate class="space-y-6 w-full">
-    <FormField v-slot="{ componentField }" name="name">
-      <FormItem>
-        <FormLabel>{{ t('globals.terms.name') }}</FormLabel>
-        <FormControl>
-          <Input type="text" v-bind="componentField" />
-        </FormControl>
-        <FormDescription>{{ t('admin.ai.tool.nameHint') }}</FormDescription>
-        <FormMessage />
-      </FormItem>
-    </FormField>
-
-    <FormField v-slot="{ componentField }" name="description">
-      <FormItem>
-        <FormLabel>{{ t('globals.terms.description') }}</FormLabel>
-        <FormControl>
-          <Textarea
-            rows="3"
-            :placeholder="t('admin.ai.tool.descriptionPlaceholder')"
-            v-bind="componentField"
-          />
-        </FormControl>
-        <FormDescription>{{ t('admin.ai.tool.descriptionHint') }}</FormDescription>
-        <FormMessage />
-      </FormItem>
-    </FormField>
-
-    <div class="grid gap-6 md:grid-cols-3">
+  <form @submit="onSubmit" novalidate class="tool-form space-y-6 w-full">
+    <FormGrid class="tool-connection-grid">
+      <FormField v-slot="{ componentField }" name="name">
+        <FormItem>
+          <FormLabel>{{ t('globals.terms.name') }}</FormLabel>
+          <FormControl>
+            <Input type="text" v-bind="componentField" />
+          </FormControl>
+          <FormDescription>{{ t('admin.ai.tool.nameHint') }}</FormDescription>
+          <FormMessage />
+        </FormItem>
+      </FormField>
       <FormField v-slot="{ componentField }" name="url">
-        <FormItem class="md:col-span-2">
+        <FormItem>
           <FormLabel>{{ t('globals.terms.url') }}</FormLabel>
           <FormControl>
-            <Input type="text" placeholder="https://api.example.com/orders/lookup" v-bind="componentField" />
+            <Input
+              type="text"
+              placeholder="https://api.example.com/orders/lookup"
+              v-bind="componentField"
+            />
           </FormControl>
           <FormMessage />
         </FormItem>
@@ -55,11 +43,26 @@
           <FormMessage />
         </FormItem>
       </FormField>
-    </div>
+    </FormGrid>
+
+    <FormField v-slot="{ componentField }" name="description">
+      <FormItem>
+        <FormLabel>{{ t('globals.terms.description') }}</FormLabel>
+        <FormControl>
+          <Textarea
+            rows="3"
+            :placeholder="t('admin.ai.tool.descriptionPlaceholder')"
+            v-bind="componentField"
+          />
+        </FormControl>
+        <FormDescription>{{ t('admin.ai.tool.descriptionHint') }}</FormDescription>
+        <FormMessage />
+      </FormItem>
+    </FormField>
 
     <FormField v-slot="{ componentField, handleChange, meta }" name="headers">
       <FormItem>
-        <FormLabel>{{ t('admin.ai.tool.headers') }}</FormLabel>
+        <FormLabel>{{ t('globals.terms.header', 2) }}</FormLabel>
         <FormControl>
           <ToolHeadersField
             :modelValue="componentField.modelValue"
@@ -119,7 +122,46 @@
       </FormItem>
     </FormField>
 
-    <div class="flex justify-end mt-10">
+    <fieldset class="min-w-0">
+      <legend class="ui-heading mb-4">
+        {{ t('globals.terms.agentAccess') }}
+      </legend>
+      <div class="space-y-5">
+        <FormField v-slot="{ componentField, handleChange }" name="copilot_enabled">
+          <FormItem>
+            <SwitchField
+              :title="t('admin.ai.tool.availableInCopilot')"
+              :checked="componentField.modelValue"
+              @update:checked="handleChange"
+            />
+          </FormItem>
+        </FormField>
+
+        <FormField v-slot="{ componentField, handleChange }" name="generate_reply_enabled">
+          <FormItem>
+            <SwitchField
+              :title="t('admin.ai.tool.availableInGenerateReply')"
+              :checked="componentField.modelValue"
+              @update:checked="handleChange"
+            />
+          </FormItem>
+        </FormField>
+
+        <FormField v-slot="{ componentField, handleChange }" name="requires_agent_approval">
+          <FormItem>
+            <SwitchField
+              :title="t('admin.ai.tool.requireAgentApproval')"
+              :description="t('admin.ai.tool.requireAgentApprovalHint')"
+              :checked="componentField.modelValue"
+              :disabled="!hasAgentSurface"
+              @update:checked="handleChange"
+            />
+          </FormItem>
+        </FormField>
+      </div>
+    </fieldset>
+
+    <div class="flex justify-end">
       <Button type="submit" :isLoading="formLoading">
         {{ isEditing ? t('globals.messages.save') : t('globals.messages.create') }}
       </Button>
@@ -156,7 +198,8 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import FormGrid from '@shared-ui/components/FormGrid.vue'
+import { computed, ref, watch } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
 import * as z from 'zod'
@@ -233,7 +276,10 @@ const form = useForm({
         }),
       parameters: z.string().optional(),
       enabled: z.boolean().optional(),
-      requires_verification: z.boolean().default(true)
+      requires_verification: z.boolean(),
+      copilot_enabled: z.boolean(),
+      generate_reply_enabled: z.boolean(),
+      requires_agent_approval: z.boolean()
     })
   ),
   initialValues: {
@@ -244,10 +290,16 @@ const form = useForm({
     headers: [],
     parameters: '',
     enabled: true,
-    requires_verification: true
+    requires_verification: true,
+    copilot_enabled: false,
+    generate_reply_enabled: false,
+    requires_agent_approval: true
   }
 })
 
+const hasAgentSurface = computed(
+  () => form.values.copilot_enabled || form.values.generate_reply_enabled
+)
 const insertParametersExample = () => {
   form.setFieldValue('parameters', parametersPlaceholder, false)
 }
@@ -286,7 +338,10 @@ watch(
             ? JSON.stringify(values.parameters, null, 2)
             : '',
         enabled: values.enabled ?? true,
-        requires_verification: values.requires_verification ?? true
+        requires_verification: values.requires_verification ?? true,
+        copilot_enabled: values.copilot_enabled ?? false,
+        generate_reply_enabled: values.generate_reply_enabled ?? false,
+        requires_agent_approval: values.requires_agent_approval ?? true
       },
       false
     )
@@ -319,6 +374,9 @@ const onSubmit = form.handleSubmit(async (values) => {
       method: values.method || 'POST',
       enabled: !!values.enabled,
       requires_verification: values.requires_verification !== false,
+      copilot_enabled: !!values.copilot_enabled,
+      generate_reply_enabled: !!values.generate_reply_enabled,
+      requires_agent_approval: values.requires_agent_approval !== false,
       auth: { headers },
       parameters
     })
@@ -327,3 +385,19 @@ const onSubmit = form.handleSubmit(async (values) => {
   }
 })
 </script>
+
+<style scoped>
+.tool-form {
+  container-type: inline-size;
+}
+
+.tool-connection-grid.form-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 40rem) {
+  .tool-connection-grid.form-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.75fr) minmax(0, 1fr);
+  }
+}
+</style>

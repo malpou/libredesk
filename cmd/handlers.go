@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"mime"
 	"net/http"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abhinavxd/libredesk/internal/envelope"
 	"github.com/abhinavxd/libredesk/internal/ws"
@@ -14,15 +16,18 @@ import (
 	"github.com/zerodha/fastglue"
 )
 
-const maxPageSize = 500
+const (
+	maxPageSize = 500
+	maxIDsParam = 200
+)
 
 // initHandlers initializes the HTTP routes and handlers for the application.
 func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	// Authentication.
-	g.POST("/api/v1/auth/login", rateLimit(handleLogin, "auth"))
-	g.GET("/logout", auth(handleLogout))
+	g.POST("/api/v1/auth/login", rateLimit(sessionLogin(handleLogin), "auth"))
+	g.POST("/api/v1/auth/logout", auth(handleLogout))
 	g.GET("/api/v1/oidc/{id}/login", rateLimit(handleOIDCLogin, "auth"))
-	g.GET("/api/v1/oidc/{id}/finish", rateLimit(handleOIDCCallback, "auth"))
+	g.GET("/api/v1/oidc/{id}/finish", rateLimit(sessionLogin(handleOIDCCallback), "auth"))
 
 	// i18n.
 	g.GET("/api/v1/lang", handleGetAvailableLanguages)
@@ -53,8 +58,10 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.GET("/api/v1/conversations/unassigned", perm(handleGetUnassignedConversations, "conversations:read_unassigned"))
 	g.GET("/api/v1/conversations/assigned", perm(handleGetAssignedConversations, "conversations:read_assigned"))
 	g.GET("/api/v1/conversations/mentioned", perm(handleGetMentionedConversations, "conversations:read"))
+	g.GET("/api/v1/conversations/sidebar-counts", perm(handleGetSidebarCounts, "conversations:read"))
 	g.GET("/api/v1/teams/{id}/conversations/unassigned", perm(handleGetTeamUnassignedConversations, "conversations:read_team_inbox"))
 	g.GET("/api/v1/views/{id}/conversations", perm(handleGetViewConversations, "conversations:read"))
+	g.GET("/api/v1/views/{id}/count", perm(handleGetViewCount, "conversations:read"))
 	g.GET("/api/v1/conversations/{uuid}", perm(handleGetConversation, "conversations:read"))
 	g.GET("/api/v1/conversations/{uuid}/participants", perm(handleGetConversationParticipants, "conversations:read"))
 	g.PUT("/api/v1/conversations/{uuid}/assignee/user", perm(handleUpdateUserAssignee, "conversations:update_user_assignee"))
@@ -70,9 +77,9 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.GET("/api/v1/conversations/{cuuid}/messages/{uuid}", perm(handleGetMessage, "messages:read"))
 	g.GET("/api/v1/conversations/{uuid}/messages", perm(handleGetMessages, "messages:read"))
 	g.GET("/api/v1/conversations/{uuid}/transcript", perm(handleDownloadConversationTranscript, "messages:read"))
-	g.POST("/api/v1/conversations/{cuuid}/messages", perm(handleSendMessage, "messages:write"))
+	g.POST("/api/v1/conversations/{cuuid}/messages", auth(handleSendMessage))
 	g.PUT("/api/v1/conversations/{cuuid}/messages/{uuid}/retry", perm(handleRetryMessage, "messages:write"))
-	g.DELETE("/api/v1/conversations/{cuuid}/messages/{uuid}", perm(handleDeleteMessage, "messages:write"))
+	g.DELETE("/api/v1/conversations/{cuuid}/messages/{uuid}", perm(handleDeleteMessage, "messages:write_private"))
 	g.POST("/api/v1/conversations", perm(handleCreateConversation, "conversations:write"))
 	g.PUT("/api/v1/conversations/{uuid}/custom-attributes", auth(handleUpdateConversationCustomAttributes))
 	g.PUT("/api/v1/conversations/{uuid}/contacts/custom-attributes", auth(handleUpdateContactCustomAttributes))
@@ -85,6 +92,10 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.GET("/api/v1/conversations/search", perm(handleSearchConversations, "conversations:read"))
 	g.GET("/api/v1/messages/search", perm(handleSearchMessages, "messages:read"))
 	g.GET("/api/v1/contacts/search", perm(handleSearchContacts, "contacts:read"))
+
+	// New paginated search bar routes with better filter support and pagination.
+	g.GET("/api/v1/search/conversations", perm(handlePaginatedSearchConversations, "conversations:read"))
+	g.GET("/api/v1/search/messages", perm(handlePaginatedSearchMessages, "messages:read"))
 
 	// Views.
 	g.GET("/api/v1/views/me", perm(handleGetUserViews, "view:manage"))
@@ -117,7 +128,9 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 
 	// Macros.
 	g.GET("/api/v1/macros", auth(handleGetMacros))
-	g.GET("/api/v1/macros/{id}", perm(handleGetMacro, "macros:manage"))
+	g.GET("/api/v1/macros/compact", perm(handleGetMacrosCompact, "macros:manage"))
+	g.GET("/api/v1/macros/search", auth(handleSearchMacros))
+	g.GET("/api/v1/macros/{id}", auth(handleGetMacro))
 	g.POST("/api/v1/macros", perm(handleCreateMacro, "macros:manage"))
 	g.PUT("/api/v1/macros/{id}", perm(handleUpdateMacro, "macros:manage"))
 	g.DELETE("/api/v1/macros/{id}", perm(handleDeleteMacro, "macros:manage"))
@@ -134,17 +147,18 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.GET("/api/v1/agents", perm(handleGetAgents, "users:manage"))
 	g.GET("/api/v1/agents/{id}", perm(handleGetAgent, "users:manage"))
 	g.POST("/api/v1/agents", perm(handleCreateAgent, "users:manage"))
-	g.PUT("/api/v1/agents/{id}", perm(clearsHCCache(handleUpdateAgent), "users:manage"))
-	g.DELETE("/api/v1/agents/{id}", perm(clearsHCCache(handleDeleteAgent), "users:manage"))
+	g.PUT("/api/v1/agents/{id}", perm(clearsHCCache(sessionChange(handleUpdateAgent)), "users:manage"))
+	g.DELETE("/api/v1/agents/{id}", perm(clearsHCCache(sessionChange(handleDeleteAgent)), "users:manage"))
 	g.POST("/api/v1/agents/import", perm(clearsHCCache(handleImportAgents), "users:manage"))
 	g.GET("/api/v1/agents/import/status", perm(handleGetAgentImportStatus, "users:manage"))
 	g.POST("/api/v1/agents/{id}/api-key", perm(handleGenerateAPIKey, "users:manage"))
 	g.DELETE("/api/v1/agents/{id}/api-key", perm(handleRevokeAPIKey, "users:manage"))
 	g.POST("/api/v1/agents/reset-password", rateLimit(tryAuth(handleResetPassword), "auth"))
-	g.POST("/api/v1/agents/set-password", rateLimit(tryAuth(handleSetPassword), "auth"))
+	g.POST("/api/v1/agents/set-password", rateLimit(tryAuth(sessionChange(handleSetPassword)), "auth"))
 
 	// Contacts.
 	g.GET("/api/v1/contacts", perm(handleGetContacts, "contacts:read_all"))
+	g.POST("/api/v1/contacts", perm(handleCreateContact, "contacts:write"))
 	g.GET("/api/v1/contacts/{id}", perm(handleGetContact, "contacts:read"))
 	g.PUT("/api/v1/contacts/{id}", perm(handleUpdateContact, "contacts:write"))
 	g.PUT("/api/v1/contacts/{id}/block", perm(handleBlockContact, "contacts:block"))
@@ -176,11 +190,13 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 
 	// Inboxes.
 	g.GET("/api/v1/inboxes", auth(handleGetInboxes))
+	g.GET("/api/v1/inboxes/{id}/campaign-stats", perm(handleCampaignStats, "inboxes:manage"))
 	g.GET("/api/v1/inboxes/{id}", perm(handleGetInbox, "inboxes:manage"))
 	g.POST("/api/v1/inboxes", perm(handleCreateInbox, "inboxes:manage"))
 	g.PUT("/api/v1/inboxes/{id}/toggle", perm(handleToggleInbox, "inboxes:manage"))
 	g.PUT("/api/v1/inboxes/{id}", perm(handleUpdateInbox, "inboxes:manage"))
 	g.DELETE("/api/v1/inboxes/{id}", perm(handleDeleteInbox, "inboxes:manage"))
+	g.POST("/api/v1/inboxes/{id}/aliases/verify", perm(handleVerifySendForInboxAlias, "inboxes:manage"))
 
 	// OAuth endpoints for email inboxes.
 	g.POST("/api/v1/inboxes/oauth/{provider}/authorize", perm(handleOAuthAuthorize, "inboxes:manage"))
@@ -244,6 +260,10 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 
 	// AI completions.
 	g.GET("/api/v1/ai/prompts", auth(handleGetAIPrompts))
+	g.GET("/api/v1/ai/prompts/{id}", perm(handleGetAIPrompt, "ai:manage"))
+	g.POST("/api/v1/ai/prompts", perm(handleCreateAIPrompt, "ai:manage"))
+	g.PUT("/api/v1/ai/prompts/{id}", perm(handleUpdateAIPrompt, "ai:manage"))
+	g.DELETE("/api/v1/ai/prompts/{id}", perm(handleDeleteAIPrompt, "ai:manage"))
 	g.POST("/api/v1/ai/completion", auth(handleAICompletion))
 
 	// AI provider config (completion / embedding).
@@ -267,9 +287,11 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 
 	// AI assistant: reply drafting + copilot chat.
 	g.POST("/api/v1/ai/generate-reply", auth(handleAIGenerateReply))
-	g.POST("/api/v1/ai/summarize", perm(handleAISummarizeConversation, "messages:write"))
+	g.POST("/api/v1/ai/summarize", perm(handleAISummarizeConversation, "messages:write_private"))
 	g.POST("/api/v1/ai/suggest-tags", auth(handleAISuggestTags))
 	g.POST("/api/v1/ai/copilot", auth(handleAICopilot))
+	g.POST("/api/v1/ai/tool-runs/{id}/approve", auth(handleApproveAIToolRun))
+	g.POST("/api/v1/ai/tool-runs/{id}/decline", auth(handleDeclineAIToolRun))
 	g.GET("/api/v1/ai/copilot/messages", auth(handleGetCopilotMessages))
 	g.DELETE("/api/v1/ai/copilot/messages", auth(handleClearCopilotMessages))
 
@@ -313,6 +335,9 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.PUT("/api/v1/articles/{id}", perm(clearsHCCache(handleUpdateArticle), "help_center:manage"))
 	g.PUT("/api/v1/articles/{id}/collection", perm(clearsHCCache(handleMoveArticle), "help_center:manage"))
 	g.PUT("/api/v1/articles/{id}/status", perm(clearsHCCache(handleUpdateArticleStatus), "help_center:manage"))
+	g.GET("/api/v1/help-centers/{id}/linkable-articles", perm(handleGetLinkableArticles, "help_center:manage"))
+	g.PUT("/api/v1/articles/{id}/link-translation", perm(clearsHCCache(handleLinkArticleTranslation), "help_center:manage"))
+	g.PUT("/api/v1/articles/{id}/unlink-translation", perm(clearsHCCache(handleUnlinkArticleTranslation), "help_center:manage"))
 	g.GET("/api/v1/help-centers/{id}/insights", perm(handleGetHelpCenterInsights, "help_center:manage"))
 
 	// Public help center JSON API.
@@ -341,6 +366,10 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.PUT("/api/v1/notifications/read-all", auth(handleMarkAllNotificationsAsRead))
 	g.DELETE("/api/v1/notifications/{id}", auth(handleDeleteNotification))
 	g.DELETE("/api/v1/notifications", auth(handleDeleteAllNotifications))
+	g.GET("/api/v1/notifications/preferences", auth(handleGetNotificationPreferences))
+	g.PUT("/api/v1/notifications/preferences", auth(handleUpdateNotificationPreferences))
+	g.POST("/api/v1/notifications/push-subscriptions", auth(handleCreatePushSubscription))
+	g.DELETE("/api/v1/notifications/push-subscriptions", auth(handleDeletePushSubscription))
 
 	// WebSocket.
 	g.GET("/ws", auth(func(r *fastglue.Request) error {
@@ -353,14 +382,35 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	// Widget APIs.
 	g.GET("/api/v1/widget/chat/settings/launcher", rateLimit(validateWidgetInbox(handleGetChatLauncherSettings), "widget"))
 	g.GET("/api/v1/widget/chat/settings", rateLimit(validateWidgetInbox(handleGetChatSettings), "widget"))
+	g.POST("/api/v1/widget/chat/campaigns/next", rateLimit(optionalWidgetAuth(handleWidgetCampaign), "widget"))
+	g.POST("/api/v1/widget/chat/campaigns/event", rateLimit(optionalWidgetAuth(handleWidgetCampaignEvent), "widget"))
+	g.GET("/api/v1/widget/chat/help", rateLimit(optionalWidgetAuth(handleWidgetHelp), "widget"))
+	g.GET("/api/v1/widget/chat/help/search", rateLimit(optionalWidgetAuth(handleWidgetHelpSearch), "widget"))
+	g.GET("/api/v1/widget/chat/help/articles/{article_slug}", rateLimit(optionalWidgetAuth(handleWidgetHelpArticle), "widget"))
 	g.POST("/api/v1/widget/chat/auth/exchange", rateLimit(validateWidgetInbox(handleAuthExchange), "widget"))
 	g.GET("/api/v1/widget/chat/auth/me", rateLimit(widgetAuth(handleWidgetAuthMe), "widget"))
 	g.POST("/api/v1/widget/chat/conversations/init", rateLimit(widgetAuth(handleChatInit), "widget"))
 	g.GET("/api/v1/widget/chat/conversations", rateLimit(widgetAuth(handleGetConversations), "widget"))
 	g.POST("/api/v1/widget/chat/conversations/{uuid}/update-last-seen", rateLimit(widgetAuth(handleChatUpdateLastSeen), "widget"))
 	g.GET("/api/v1/widget/chat/conversations/{uuid}", rateLimit(widgetAuth(handleChatGetConversation), "widget"))
+	g.GET("/api/v1/widget/chat/conversations/{uuid}/transcript", rateLimit(widgetAuth(handleWidgetTranscript), "widget"))
 	g.POST("/api/v1/widget/chat/conversations/{uuid}/message", rateLimit(widgetAuth(handleChatSendMessage), "widget"))
+	g.POST("/api/v1/widget/chat/conversations/{uuid}/handoff-form", rateLimit(widgetAuth(handleChatSubmitHandoffForm), "widget"))
 	g.POST("/api/v1/widget/media/upload", rateLimit(widgetAuth(handleWidgetMediaUpload), "widget"))
+
+	// WhatsApp.
+	g.GET("/webhooks/whatsapp/{inbox_id}", rateLimit(handleWhatsAppWebhookVerify, "public"))
+	g.POST("/webhooks/whatsapp/{inbox_id}", handleWhatsAppWebhookEvent)
+
+	g.GET("/api/v1/whatsapp/contacts/{contact_id}/open-conversation", perm(handleGetWhatsAppOpenConversation, "conversations:read"))
+
+	// WhatsApp templates.
+	g.GET("/api/v1/whatsapp/templates", auth(handleListWhatsAppTemplates))
+	g.GET("/api/v1/whatsapp/templates/{id}", perm(handleGetWhatsAppTemplate, "inboxes:manage"))
+	g.POST("/api/v1/whatsapp/templates", perm(handleCreateWhatsAppTemplate, "inboxes:manage"))
+	g.PUT("/api/v1/whatsapp/templates/{id}", perm(handleUpdateWhatsAppTemplate, "inboxes:manage"))
+	g.DELETE("/api/v1/whatsapp/templates/{id}", perm(handleDeleteWhatsAppTemplate, "inboxes:manage"))
+	g.POST("/api/v1/whatsapp/templates/sync", perm(handleSyncWhatsAppTemplates, "inboxes:manage"))
 
 	// getAndHead registers both methods: uptime checkers and link validators probe with HEAD.
 	getAndHead := func(path string, h fastglue.FastRequestHandler) {
@@ -387,6 +437,8 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.GET("/assets/{all:*}", serveFrontendStaticFiles)
 	g.GET("/widget/assets/{all:*}", serveWidgetStaticFiles)
 	g.GET("/images/{all:*}", serveFrontendStaticFiles)
+	g.GET("/manifest.webmanifest", serveManifest)
+	g.GET("/sw.js", serveServiceWorker)
 	g.GET("/static/public/{all:*}", serveStaticFiles)
 
 	// Public pages.
@@ -415,6 +467,9 @@ func serveIndexPage(r *fastglue.Request) error {
 	r.RequestCtx.Response.Header.Add("Cache-Control", "no-store, no-cache, must-revalidate, post-check=0, pre-check=0")
 	r.RequestCtx.Response.Header.Add("Pragma", "no-cache")
 	r.RequestCtx.Response.Header.Add("Expires", "-1")
+
+	r.RequestCtx.Response.Header.Set("Content-Security-Policy", "frame-ancestors 'self'")
+	r.RequestCtx.Response.Header.Set("X-Frame-Options", "SAMEORIGIN")
 
 	// Serve the index.html file from the embedded filesystem.
 	file, err := app.fs.Get(path.Join(frontendDir, "index.html"))
@@ -506,6 +561,27 @@ func serveFrontendStaticFiles(r *fastglue.Request) error {
 	return nil
 }
 
+func serveManifest(r *fastglue.Request) error {
+	return serveMainFrontendFile(r, "manifest.webmanifest", "application/manifest+json", "no-cache")
+}
+
+func serveServiceWorker(r *fastglue.Request) error {
+	r.RequestCtx.Response.Header.Set("Service-Worker-Allowed", "/")
+	return serveMainFrontendFile(r, "sw.js", "application/javascript", "no-cache")
+}
+
+func serveMainFrontendFile(r *fastglue.Request, name, contentType, cacheControl string) error {
+	app := r.Context.(*App)
+	file, err := app.fs.Get(filepath.Join(frontendDir, name))
+	if err != nil {
+		return r.SendErrorEnvelope(http.StatusNotFound, app.i18n.T("validation.notFoundFile"), nil, envelope.NotFoundError)
+	}
+	r.RequestCtx.Response.Header.Set("Content-Type", contentType)
+	r.RequestCtx.Response.Header.Set("Cache-Control", cacheControl)
+	r.RequestCtx.SetBody(file.ReadBytes())
+	return nil
+}
+
 // serveWidgetStaticFiles serves widget static assets from the embedded filesystem.
 func serveWidgetStaticFiles(r *fastglue.Request) error {
 	app := r.Context.(*App)
@@ -534,7 +610,9 @@ func serveWidgetJS(r *fastglue.Request) error {
 	app := r.Context.(*App)
 
 	r.RequestCtx.Response.Header.Set("Content-Type", "application/javascript")
-	r.RequestCtx.Response.Header.Set("Cache-Control", "no-cache")
+	r.RequestCtx.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	r.RequestCtx.Response.Header.Set("Pragma", "no-cache")
+	r.RequestCtx.Response.Header.Set("Expires", "0")
 
 	file, err := app.fs.Get("static/widget.js")
 	if err != nil {
@@ -543,6 +621,26 @@ func serveWidgetJS(r *fastglue.Request) error {
 
 	r.RequestCtx.Response.SetBodyRaw(file.ReadBytes())
 	return nil
+}
+
+// getIDsParam parses a comma separated list of positive IDs from a query param.
+func getIDsParam(r *fastglue.Request, name string) []int {
+	raw := strings.TrimSpace(string(r.RequestCtx.QueryArgs().Peek(name)))
+	if raw == "" {
+		return nil
+	}
+	var ids []int
+	for part := range strings.SplitSeq(raw, ",") {
+		id, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || id <= 0 {
+			continue
+		}
+		ids = append(ids, id)
+		if len(ids) == maxIDsParam {
+			break
+		}
+	}
+	return ids
 }
 
 // getPagination extracts page and page_size from query params with defaults.
@@ -561,17 +659,46 @@ func getPagination(r *fastglue.Request) (page, pageSize int) {
 	return page, pageSize
 }
 
+// getOptionalPagination reads page/page_size, returning pageSize 0 (fetch everything) when absent.
+func getOptionalPagination(r *fastglue.Request) (page, pageSize int) {
+	page, _ = strconv.Atoi(string(r.RequestCtx.QueryArgs().Peek("page")))
+	pageSize, _ = strconv.Atoi(string(r.RequestCtx.QueryArgs().Peek("page_size")))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 0 {
+		pageSize = 0
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+	return page, pageSize
+}
+
 // sendErrorEnvelope sends a standardized error response to the client.
 func sendErrorEnvelope(r *fastglue.Request, err error) error {
 	e, ok := err.(envelope.Error)
 	if !ok {
+		app := r.Context.(*App)
+		app.lo.Error("non-envelope error reached sendErrorEnvelope", "path", string(r.RequestCtx.Path()), "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError,
-			"Error interface conversion failed", nil, fastglue.ErrorType(envelope.GeneralError))
+			app.i18n.T("globals.messages.somethingWentWrong"), nil, fastglue.ErrorType(envelope.GeneralError))
 	}
 	return r.SendErrorEnvelope(e.Code, e.Error(), e.Data, fastglue.ErrorType(e.ErrorType))
 }
 
-// handleHealthCheck handles the health check endpoint.
+// healthCheckTimeout bounds the database ping, so a hung connection fails the check instead of stalling it.
+const healthCheckTimeout = 3 * time.Second
+
+// handleHealthCheck handles the health check endpoint. It reports healthy only while the database answers.
 func handleHealthCheck(r *fastglue.Request) error {
+	app := r.Context.(*App)
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+	defer cancel()
+	if err := app.db.PingContext(ctx); err != nil {
+		app.lo.Error("health check: database unreachable", "error", err)
+		return r.SendErrorEnvelope(fasthttp.StatusServiceUnavailable, "database unreachable", nil, envelope.GeneralError)
+	}
 	return r.SendEnvelope(true)
 }

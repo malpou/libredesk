@@ -1,12 +1,14 @@
 # Libredesk Roadmap
 
-The open-source customer support platform you actually own. One inbox for email, live chat, and WhatsApp - self-hosted, no per-seat pricing.
+The open-source customer support platform you actually own.
+One app for email, live chat, WhatsApp, and more — self-hosted, with no per-seat pricing.
 
-## Near Term
-- WhatsApp channel - WIP
+## In Progress
+- Advanced conversation reports
+- Contact merging
+- Customer portal for managing tickets
+- 2FA for password login
+- Telegram channel
 
-## Mid Term
-- Portal to manage tickets - TODO
-- Conversation reports - TODO
-- Contact merging - TODO
-- 2FA for password login - TODO
+## Planned
+

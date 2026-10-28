@@ -34,6 +34,21 @@ read_buffer_size = 65536
 # Keepalive settings.
 keepalive_timeout = "10s"
 
+[auth]
+# Allow users to sign in with their libredesk email and password.
+# Disable this only after configuring and enabling at least one OIDC provider.
+# libredesk automatically keeps local login available when no OIDC provider is enabled to prevent lockout.
+# If an enabled provider is unavailable or misconfigured, set auth.local_login_enabled = true to restore password login.
+local_login_enabled = true
+
+# Optional client credentials for one OIDC provider, read from here instead of the database.
+# Can also be set with LIBREDESK_OIDC__CLIENT_ID and LIBREDESK_OIDC__CLIENT_SECRET.
+# When both are set, the SSO provider with this client ID uses this client secret, and its client ID,
+# secret and provider URL cannot be edited in Admin -> Security -> SSO. Leave empty to manage them there.
+[oidc]
+client_id = ""
+client_secret = ""
+
 # File upload provider to use, either `fs` or `s3`.
 [upload]
 provider = "fs"
@@ -66,12 +81,6 @@ bucket_path = ""
 # S3 signed URL expiry duration (e.g., "30m", "1h")
 expiry = "30m"
 
-# OIDC client credentials from config/env (e.g. LIBREDESK_OIDC__CLIENT_ID and LIBREDESK_OIDC__CLIENT_SECRET).
-# When both are set, the SSO provider with this client ID uses this secret instead of the one saved in Admin -> Security -> SSO.
-# [oidc]
-# client_id = ""
-# client_secret = ""
-
 # Postgres.
 [db]
 # If running locally, use `localhost`.
@@ -94,6 +103,7 @@ max_lifetime = "300s"
 # short-lived state. libredesk binds to existing buckets and never creates them: run
 # scripts/nats-kv-buckets.sh (or provision the same buckets) first. Startup fails if a bucket
 # is missing or its max age is shorter than the values libredesk keeps in it.
+# WhatsApp inbound is off on this build: its Redis Streams queue is not ported to NATS.
 [nats]
 # If running locally, use `nats://localhost:4222`.
 url = "nats://nats:4222"
@@ -138,6 +148,8 @@ queue_size = 2000
 [automation]
 # Number of workers processing automation rules
 worker_count = 10
+# Applies to conversation creation dates. Zero or negative values use 90 days.
+time_trigger_lookback_days = 90
 
 [ai_agent]
 # Number of workers running autonomous AI assistant responses

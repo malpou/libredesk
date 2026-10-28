@@ -1,4 +1,6 @@
-{{ define "docs-header" }}
+{{ define "docs-header" }}{{ if .Data.HelpCenter.Embed }}{{ template "hc-embed-open" . }}{{ else }}{{ template "docs-site-header" . }}{{ end }}{{ end }}
+
+{{ define "docs-site-header" }}
 {{ template "hc-head" . }}
 <body class="hcd">
     <a class="hc-skip-link" href="#hc-main">{{ .L.T "helpCenter.skipToContent" }}</a>
@@ -10,7 +12,7 @@
                     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14" stroke-linecap="round"/></svg>
                 </button>
                 <a class="hcd-brand" href="{{ .Data.HelpCenter.BasePath }}">
-                    {{ if .Data.HelpCenter.LogoURL }}<img src="{{ .Data.HelpCenter.LogoURL }}" alt="{{ .Data.HelpCenter.Name }}" />{{ else }}<span class="hcd-brand-name">{{ .Data.HelpCenter.Name }}</span>{{ end }}
+                    {{ if .Data.HelpCenter.LogoURL }}<img class="hc-logo-light" src="{{ .Data.HelpCenter.LogoURL }}" alt="{{ .Data.HelpCenter.Name }}" />{{ if .Data.HelpCenter.LogoURLDark }}<img class="hc-logo-dark" src="{{ .Data.HelpCenter.LogoURLDark }}" alt="{{ .Data.HelpCenter.Name }}" />{{ end }}{{ else }}<span class="hcd-brand-name">{{ .Data.HelpCenter.Name }}</span>{{ end }}
                 </a>
             </div>
             <a class="hcd-search-btn" href="{{ .Data.HelpCenter.BasePath }}/search" data-hcd-search-open>
@@ -24,7 +26,10 @@
                     {{ range .Data.HelpCenter.NavLinks }}<a href="{{ .URL }}">{{ .Label }}</a>{{ end }}
                 </nav>
                 {{ end }}
-                {{ if gt (len .Data.HelpCenter.AvailableLocales) 1 }}{{ template "hc-lang-switcher" . }}{{ end }}
+                <div class="hc-nav-actions">
+                    {{ if gt (len .Data.HelpCenter.AvailableLocales) 1 }}{{ template "hc-lang-switcher" . }}{{ end }}
+                    {{ if .Data.HelpCenter.ShowThemeToggle }}{{ template "hc-theme-toggle" . }}{{ end }}
+                </div>
             </div>
         </div>
     </header>
@@ -85,7 +90,9 @@
 </div>
 {{ end }}
 
-{{ define "docs-footer" }}
+{{ define "docs-footer" }}{{ if .Data.HelpCenter.Embed }}{{ template "hc-embed-close" . }}{{ else }}{{ template "docs-site-footer" . }}{{ end }}{{ end }}
+
+{{ define "docs-site-footer" }}
         </main>
     </div>
     <footer class="hcd-footer">
@@ -114,7 +121,11 @@
             lastOpener = document.activeElement;
             layer.hidden = false;
             document.body.setAttribute('data-hcd-modal-open', '');
-            if (input) { input.value = ''; input.focus(); }
+            if (input) {
+                input.value = '';
+                input.dispatchEvent(new Event('input'));
+                input.focus();
+            }
         }
         function closeSearch() {
             layer.hidden = true;
@@ -128,7 +139,7 @@
             layer.querySelector('[data-hcd-search-close]').addEventListener('click', closeSearch);
             layer.addEventListener('keydown', function (e) {
                 if (e.key !== 'Tab') return;
-                var items = layer.querySelectorAll('a[href], button, input');
+                var items = Array.from(layer.querySelectorAll('a[href], button, input')).filter(function (el) { return el.getClientRects().length && !el.disabled; });
                 if (!items.length) return;
                 var first = items[0], last = items[items.length - 1];
                 if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -158,13 +169,40 @@
         var shell = document.querySelector('.hcd-shell');
         var toggle = document.querySelector('[data-hcd-sidebar-toggle]');
         if (shell && toggle) {
-            var closeSidebar = function () { shell.removeAttribute('data-sidebar-open'); toggle.setAttribute('aria-expanded', 'false'); };
-            toggle.addEventListener('click', function () {
+            var sidebar = shell.querySelector('.hcd-sidebar');
+            var mobile = window.matchMedia('(max-width: 1023px)');
+            var syncSidebar = function () {
                 var open = shell.hasAttribute('data-sidebar-open');
-                if (open) { closeSidebar(); } else { shell.setAttribute('data-sidebar-open', ''); toggle.setAttribute('aria-expanded', 'true'); }
+                sidebar.inert = mobile.matches && !open;
+                document.body.toggleAttribute('data-hcd-sidebar-open', mobile.matches && open);
+            };
+            var closeSidebar = function () {
+                if (sidebar.contains(document.activeElement) && mobile.matches) toggle.focus();
+                shell.removeAttribute('data-sidebar-open');
+                toggle.setAttribute('aria-expanded', 'false');
+                syncSidebar();
+            };
+            syncSidebar();
+            mobile.addEventListener('change', closeSidebar);
+            toggle.addEventListener('click', function (e) {
+                var open = shell.hasAttribute('data-sidebar-open');
+                shell.toggleAttribute('data-sidebar-keyboard', e.detail === 0);
+                if (open) { closeSidebar(); } else {
+                    shell.setAttribute('data-sidebar-open', '');
+                    toggle.setAttribute('aria-expanded', 'true');
+                    syncSidebar();
+                    if (e.detail === 0) sidebar.querySelector('a[href], button').focus();
+                }
             });
             var backdrop = shell.querySelector('[data-hcd-sidebar-close]');
             if (backdrop) backdrop.addEventListener('click', closeSidebar);
+            sidebar.addEventListener('keydown', function (e) {
+                if (e.key !== 'Tab' || !mobile.matches) return;
+                var items = Array.from(sidebar.querySelectorAll('a[href], button')).filter(function (el) { return el.getClientRects().length && !el.disabled; });
+                var first = items[0], last = items[items.length - 1];
+                if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+            });
             document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSidebar(); });
         }
         var setOpen = function (group, open) {
@@ -181,12 +219,15 @@
         var current = document.querySelector('.hcd-nav [aria-current="page"]');
         if (current) {
             for (var g = current.closest('.hcd-nav-group'); g; g = g.parentElement && g.parentElement.closest('.hcd-nav-group')) setOpen(g, true);
-            if (current.scrollIntoView) current.scrollIntoView({ block: 'center' });
+            var rail = current.closest('.hcd-sidebar');
+            if (rail && !rail.inert) rail.scrollTop += current.getBoundingClientRect().top - rail.getBoundingClientRect().top - rail.clientHeight / 2 + current.clientHeight / 2;
         }
     })();
     </script>
     <script src="/static/public/static/help-center-search.js?v={{ AssetVer }}" defer></script>
     {{ if .Data.HelpCenter.CustomJS }}<script>{{ .Data.HelpCenter.CustomJS }}</script>{{ end }}
+    {{ if .Data.HelpCenter.ShowThemeToggle }}{{ template "hc-theme-script" . }}{{ end }}
+{{ template "hc-livechat-widget" . }}
 </body>
 </html>
 {{ end }}

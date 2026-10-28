@@ -21,12 +21,21 @@ func handleGetTeams(r *fastglue.Request) error {
 	return r.SendEnvelope(teams)
 }
 
-// handleGetTeamsCompact returns a list of all teams in a compact format.
+// handleGetTeamsCompact returns teams in a compact format, all of them without page params.
 func handleGetTeamsCompact(r *fastglue.Request) error {
 	var (
-		app = r.Context.(*App)
+		app   = r.Context.(*App)
+		query = string(r.RequestCtx.QueryArgs().Peek("q"))
 	)
-	teams, err := app.team.GetAllCompact()
+	if ids := getIDsParam(r, "ids"); len(ids) > 0 {
+		teams, err := app.team.GetAllCompactByIDs(ids)
+		if err != nil {
+			return sendErrorEnvelope(r, err)
+		}
+		return r.SendEnvelope(teams)
+	}
+	page, pageSize := getOptionalPagination(r)
+	teams, err := app.team.GetAllCompact(query, page, pageSize)
 	if err != nil {
 		return sendErrorEnvelope(r, err)
 	}
@@ -113,6 +122,7 @@ func handleDeleteTeam(r *fastglue.Request) error {
 	}
 	for _, mid := range memberIDs {
 		app.user.InvalidateAgentCache(mid)
+		app.wsHub.KickUser(mid)
 	}
 	return r.SendEnvelope(true)
 }

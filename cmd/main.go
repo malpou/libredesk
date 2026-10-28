@@ -26,6 +26,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/colorlog"
 	"github.com/abhinavxd/libredesk/internal/csat"
 	customAttribute "github.com/abhinavxd/libredesk/internal/custom_attribute"
+	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat/proactive"
 	"github.com/abhinavxd/libredesk/internal/macro"
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
 	"github.com/abhinavxd/libredesk/internal/report"
@@ -33,6 +34,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/sla"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 	"github.com/abhinavxd/libredesk/internal/view"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/abhinavxd/libredesk/internal/automation"
 	contextlink "github.com/abhinavxd/libredesk/internal/context_link"
@@ -52,7 +54,10 @@ import (
 	"github.com/abhinavxd/libredesk/internal/template"
 	"github.com/abhinavxd/libredesk/internal/user"
 	"github.com/abhinavxd/libredesk/internal/webhook"
+	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
+	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
+	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
 	"github.com/knadh/koanf/v2"
 	"github.com/knadh/stuffbin"
@@ -93,47 +98,59 @@ const (
 
 // App is the global app context which is passed and injected in the http handlers.
 type App struct {
-	ctx              context.Context
-	fs               stuffbin.FileSystem
-	consts           atomic.Value
-	auth             *auth_.Auth
-	authz            *authz.Enforcer
-	i18n             *i18n.I18n
-	lo               *logf.Logger
-	oidc             *oidc.Manager
-	media            *media.Manager
-	setting          *setting.Manager
-	role             *role.Manager
-	user             *user.Manager
-	team             *team.Manager
-	status           *status.Manager
-	priority         *priority.Manager
-	tag              *tag.Manager
-	inbox            *inbox.Manager
-	tmpl             *template.Manager
-	macro            *macro.Manager
-	conversation     *conversation.Manager
-	automation       *automation.Engine
-	businessHours    *businesshours.Manager
-	sla              *sla.Manager
-	csat             *csat.Manager
-	view             *view.Manager
-	ai               *ai.Manager
-	aiAgent          *aiagent.Manager
-	helpcenter       *helpcenter.Manager
-	search           *search.Manager
-	activityLog      *activitylog.Manager
-	notifier         *notifier.Service
-	userNotification *notifier.UserNotificationManager
-	customAttribute  *customAttribute.Manager
-	report           *report.Manager
-	webhook          *webhook.Manager
-	contextLink      *contextlink.Manager
-	rateLimit        *ratelimit.Limiter
-	kv               *kvStores
-	fc               *fastcache.FastCache
-	importer         *importer.Importer
-	wsHub            *ws.Hub
+	proactive          *proactive.Manager
+	ctx                context.Context
+	fs                 stuffbin.FileSystem
+	consts             atomic.Value
+	auth               *auth_.Auth
+	sessionsMu         sync.RWMutex
+	authz              *authz.Enforcer
+	i18n               *i18n.I18n
+	lo                 *logf.Logger
+	oidc               *oidc.Manager
+	media              *media.Manager
+	setting            *setting.Manager
+	role               *role.Manager
+	user               *user.Manager
+	team               *team.Manager
+	status             *status.Manager
+	priority           *priority.Manager
+	tag                *tag.Manager
+	inbox              *inbox.Manager
+	tmpl               *template.Manager
+	macro              *macro.Manager
+	conversation       *conversation.Manager
+	automation         *automation.Engine
+	businessHours      *businesshours.Manager
+	sla                *sla.Manager
+	csat               *csat.Manager
+	view               *view.Manager
+	ai                 *ai.Manager
+	aiAgent            *aiagent.Manager
+	helpcenter         *helpcenter.Manager
+	search             *search.Manager
+	activityLog        *activitylog.Manager
+	notifier           *notifier.Service
+	userNotification   *notifier.UserNotificationManager
+	notificationPref   *notifier.PreferenceManager
+	pushNotification   *notifier.PushManager
+	customAttribute    *customAttribute.Manager
+	report             *report.Manager
+	webhook            *webhook.Manager
+	contextLink        *contextlink.Manager
+	rateLimit          *ratelimit.Limiter
+	kv                 *kvStores
+	redis              *redis.Client // Only the WhatsApp queue, not ported to NATS: never set, so WhatsApp inbound is off.
+	db                 *sqlx.DB
+	fc                 *fastcache.FastCache
+	importer           *importer.Importer
+	whatsappTemplate   *whatsappTemplate.Manager
+	whatsappClient     *whatsappapi.Client
+	whatsappIngester   atomic.Pointer[WhatsAppIngester]
+	whatsappIngesterMu sync.Mutex
+	// Inbox IDs whose provider credentials were recently rejected, keyed to the last error time.
+	inboxAuthErrors sync.Map
+	wsHub           *ws.Hub
 
 	// Global state that stores data on an available app update.
 	update *AppUpdate
@@ -207,7 +224,7 @@ func main() {
 
 	validateConfig(ko)
 
-	startPprof()
+	startPprof(initLogger("pprof"))
 
 	// Fallback for config typo. Logs a warning but continues to work with the incorrect key.
 	// Uses 'message.message_outgoing_scan_interval' (correct key) as default key, falls back to the common typo.
@@ -237,7 +254,6 @@ func main() {
 		status                      = initStatus(db, i18n)
 		priority                    = initPriority(db, i18n)
 		ssrfControl                 = initSSRFControl()
-		auth                        = initAuth(oidc, kv.sessions, i18n, ssrfControl)
 		template                    = initTemplate(db, fs, constants, i18n)
 		media                       = initMedia(db, i18n, settings)
 		inbox                       = initInbox(db, i18n)
@@ -245,15 +261,20 @@ func main() {
 		businessHours               = initBusinessHours(db, i18n)
 		webhook                     = initWebhook(db, i18n, ssrfControl)
 		user                        = initUser(i18n, db)
+		auth                        = initAuth(oidc, kv.sessions, i18n, ssrfControl)
 		wsHub                       = initWS(user)
 		notifier                    = initNotifier()
 		userNotification            = initUserNotification(db, i18n)
-		notifDispatcher             = initNotifDispatcher(userNotification, notifier, wsHub, ko.Bool("notification.email.enabled"))
+		notificationPreference      = initNotificationPreference(db, i18n)
+		replyDeliveryChecker        = initReplyDeliveryChecker(userNotification, user, notificationPreference)
+		pushNotification            = initPushNotification(db, settings, i18n, replyDeliveryChecker)
+		notificationEmailQueue      = initNotificationEmailQueue(db, notifier, replyDeliveryChecker)
+		notifDispatcher             = initNotifDispatcher(userNotification, notificationPreference, pushNotification, notificationEmailQueue, wsHub, ko.Bool("notification.email.enabled"))
 		automation                  = initAutomationEngine(db, i18n)
 		ai                          = initAI(ctx, db, i18n, ssrfControl)
 		sla                         = initSLA(db, team, settings, businessHours, template, user, i18n, notifDispatcher)
 		conversation                = initConversations(i18n, sla, status, priority, wsHub, db, inbox, user, team, media, settings, csat, automation, template, webhook, notifDispatcher)
-		aiAgent                     = initAIAgent(db, i18n, ai, conversation, media, settings, user, notifier, kv)
+		aiAgent                     = initAIAgent(db, i18n, ai, conversation, inbox, media, settings, user, notifier, kv)
 		helpCenter                  = initHelpCenter(db, i18n, ai)
 		autoassigner                = initAutoAssigner(team, user, conversation)
 		rateLimiter                 = initRateLimit(kv.rateLimit)
@@ -268,11 +289,13 @@ func main() {
 	automation.SetSystemUserID(systemUser.ID)
 	conversation.SetAIAgent(aiAgent)
 
-	startInboxes(ctx, inbox, conversation, user, conversation.SignAvatarURL)
+	waClient := initWhatsAppClient()
+	waTemplates := initWhatsAppTemplates(db, i18n, waClient, inbox)
+	conversation.SetWhatsAppTemplateStore(waTemplates)
+	conversation.SetArticleReferenceStore(helpCenter)
 
 	go automation.Run(ctx, automationWorkers)
 	go autoassigner.Run(ctx, autoAssignInterval)
-	go conversation.Run(ctx, messageIncomingQWorkers, messageOutgoingQWorkers, messageOutgoingScanInterval)
 	go conversation.RunUnsnoozer(ctx, unsnoozeInterval)
 	go conversation.RunContinuity(ctx)
 	go webhook.Run(ctx)
@@ -284,6 +307,10 @@ func main() {
 	go conversation.RunDraftCleaner(ctx, draftRetentionDuration)
 	go userNotification.RunNotificationCleaner(ctx)
 	go helpCenter.RunSearchLogCleaner(ctx)
+	if ko.Bool("notification.email.enabled") {
+		go notificationEmailQueue.Run(ctx)
+	}
+	go pushNotification.Run(ctx)
 	go aiAgent.Run(ctx, cmp.Or(ko.Int("ai_agent.worker_count"), 10))
 	go ai.Run(ctx)
 
@@ -314,7 +341,7 @@ func main() {
 		authz:            initAuthz(i18n),
 		view:             initView(db, i18n),
 		report:           initReport(db, i18n),
-		search:           initSearch(db, i18n),
+		search:           initSearch(db, i18n, conversation),
 		role:             initRole(db, i18n),
 		tag:              initTag(db, i18n),
 		macro:            initMacro(db, i18n),
@@ -324,14 +351,32 @@ func main() {
 		importer:         initImporter(i18n),
 		webhook:          webhook,
 		contextLink:      initContextLink(db, i18n),
+		proactive:        initProactive(db, i18n),
 		rateLimit:        rateLimiter,
 		kv:               kv,
+		db:               db,
 		fc:               initFastCache(kv),
 		userNotification: userNotification,
+		whatsappClient:   waClient,
+		whatsappTemplate: waTemplates,
+		notificationPref: notificationPreference,
+		pushNotification: pushNotification,
 		wsHub:            wsHub,
 	}
 	app.consts.Store(constants)
 	helpCenterCacheOpts.Logger = log.New(helpCenterCacheLogWriter{lo: app.lo}, "", 0)
+
+	waClient.SetAuthErrorHook(makeWhatsAppAuthErrorHook(app))
+	if err := ensureWhatsAppIngester(app); err != nil {
+		app.lo.Error("error starting whatsapp ingester, inbound whatsapp messages will not be processed", "error", err)
+	}
+
+	startInboxes(ctx, inbox, conversation, user, conversation.SignAvatarURL, waClient, conversation, makeInboxAuthStatusHook(app))
+
+	// The outgoing scanner needs the inboxes registered, else queued messages fail with "inbox not found".
+	go conversation.Run(ctx, messageIncomingQWorkers, messageOutgoingQWorkers, messageOutgoingScanInterval)
+
+	go whatsappTemplateSyncWorker(ctx, app)
 
 	g := fastglue.NewGlue()
 	g.SetContext(app)
@@ -339,7 +384,7 @@ func main() {
 	g.Router.NotFound = helpCenterHostNotFound(app, g)
 
 	// Buffers above this are dropped rather than reused, and the ones we keep stay with the connection until it closes.
-	fasthttp.SetBodySizePoolLimit(64<<10, 1<<20) // request: 64 KiB, response: 1 MiB
+	fasthttp.SetBodySizePoolLimit(64<<10, 128<<10) // request: 64 KiB, response: 128 KiB
 
 	s := &fasthttp.Server{
 		Name:                 appName,
@@ -351,12 +396,12 @@ func main() {
 	}
 
 	go func() {
-		colorlog.Green("Server started at %s", ko.String("app.server.address"))
+		lo.Info("server starting", "address", ko.String("app.server.address"))
 		if ko.String("app.server.socket") != "" {
-			colorlog.Green("Unix socket created at %s", ko.String("app.server.socket"))
+			lo.Info("server using Unix socket", "socket", ko.String("app.server.socket"))
 		}
 		if err := g.ListenAndServe(ko.String("app.server.address"), ko.String("app.server.socket"), s); err != nil {
-			log.Fatalf("error starting server: %v", err)
+			lo.Fatal("error starting server", "error", err)
 		}
 	}()
 
@@ -369,42 +414,46 @@ func main() {
 	<-ctx.Done()
 	closedAgentConns := wsHub.CloseAll()
 	closedLiveChatInboxes := inbox.CloseLiveChatClients()
-	colorlog.Red("Closed %d agent websocket connections and %d livechat inboxes.", closedAgentConns, closedLiveChatInboxes)
-	colorlog.Red("Shutting down HTTP server...")
+	lo.Info("realtime connections closed", "agent_connections", closedAgentConns, "livechat_inboxes", closedLiveChatInboxes)
+	lo.Info("shutting down HTTP server")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), serverShutdownTimeout)
 	if err := s.ShutdownWithContext(shutdownCtx); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			colorlog.Red("HTTP server drain timed out after %s, exiting with connections still open: %v", serverShutdownTimeout, err)
+			lo.Warn("HTTP server drain timed out, exiting with connections still open", "timeout", serverShutdownTimeout, "error", err)
 		} else {
-			colorlog.Red("error shutting down HTTP server: %v", err)
+			lo.Error("error shutting down HTTP server", "error", err)
 		}
 	}
 	cancelShutdown()
-	colorlog.Red("Shutting down AI agent...")
+	if ing := app.ingester(); ing != nil {
+		lo.Info("shutting down whatsapp ingester")
+		ing.Close()
+	}
+	lo.Info("shutting down AI agent")
 	aiAgent.Close()
-	colorlog.Red("Shutting down AI...")
+	lo.Info("shutting down AI")
 	ai.Close()
-	colorlog.Red("Shutting down inboxes...")
+	lo.Info("shutting down inboxes")
 	inbox.Close()
-	colorlog.Red("Shutting down automation...")
+	lo.Info("shutting down automation")
 	automation.Close()
-	colorlog.Red("Shutting down autoassigner...")
+	lo.Info("shutting down autoassigner")
 	autoassigner.Close()
-	colorlog.Red("Shutting down notifier...")
+	lo.Info("shutting down notifier")
 	notifier.Close()
-	colorlog.Red("Shutting down webhook...")
+	lo.Info("shutting down webhook")
 	webhook.Close()
-	colorlog.Red("Shutting down conversation...")
+	lo.Info("shutting down conversation")
 	conversation.Close()
-	colorlog.Red("Shutting down SLA...")
+	lo.Info("shutting down SLA")
 	sla.Close()
-	colorlog.Red("Shutting down importer...")
+	lo.Info("shutting down importer")
 	app.importer.Close()
-	colorlog.Red("Shutting down database...")
+	lo.Info("shutting down database")
 	db.Close()
-	colorlog.Red("Shutting down nats...")
+	lo.Info("shutting down nats")
 	kv.nc.Close()
-	colorlog.Green("Shutdown complete.")
+	lo.Info("shutdown complete")
 }
 
 // onUsersOffline returns a callback for MonitorUserAvailability that broadcasts

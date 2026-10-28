@@ -48,31 +48,31 @@
       </FormItem>
     </FormField>
 
-    <FormField v-slot="{ componentField, handleChange }" name="visible_when">
-      <FormItem>
-        <FormLabel>{{ t('globals.messages.visibleWhen') }}</FormLabel>
-        <FormControl>
-          <SelectTag
-            :items="[
-              { label: t('globals.messages.replying'), value: 'replying' },
-              {
-                label: t('actions.startingConversation'),
-                value: 'starting_conversation'
-              },
-              {
-                label: t('actions.addingPrivateNotes'),
-                value: 'adding_private_note'
-              }
-            ]"
-            v-model="componentField.modelValue"
-            @update:modelValue="handleChange"
-          />
-        </FormControl>
-        <FormMessage />
-      </FormItem>
-    </FormField>
+    <FormGrid>
+      <FormField v-slot="{ componentField, handleChange }" name="visible_when">
+        <FormItem>
+          <FormLabel>{{ t('globals.messages.visibleWhen') }}</FormLabel>
+          <FormControl>
+            <SelectTag
+              :items="[
+                { label: t('globals.messages.replying'), value: 'replying' },
+                {
+                  label: t('actions.startingConversation'),
+                  value: 'starting_conversation'
+                },
+                {
+                  label: t('actions.addingPrivateNotes'),
+                  value: 'adding_private_note'
+                }
+              ]"
+              v-model="componentField.modelValue"
+              @update:modelValue="handleChange"
+            />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      </FormField>
 
-    <div class="grid grid-cols-2 gap-4">
       <FormField
         v-slot="{ componentField }"
         name="visibility"
@@ -102,55 +102,59 @@
         </FormItem>
       </FormField>
 
-      <FormField v-if="form.values.visibility === 'team'" v-slot="{ componentField }" name="team_id">
+      <FormField
+        v-if="form.values.visibility === 'team'"
+        v-slot="{ componentField }"
+        name="team_id"
+      >
         <FormItem>
           <FormLabel>{{ t('globals.terms.team') }}</FormLabel>
           <FormControl>
-            <SelectComboBox
-              v-bind="componentField"
-              :items="tStore.options"
-              :placeholder="t('placeholders.selectTeam')"
-              type="team"
-            />
+            <SelectTeamCombobox v-bind="componentField" />
           </FormControl>
           <FormMessage />
         </FormItem>
       </FormField>
 
-      <FormField v-if="form.values.visibility === 'user'" v-slot="{ componentField }" name="user_id">
+      <FormField
+        v-if="form.values.visibility === 'user'"
+        v-slot="{ componentField }"
+        name="user_id"
+      >
         <FormItem>
           <FormLabel>{{ t('globals.terms.agent') }}</FormLabel>
           <FormControl>
-            <SelectComboBox
-              v-bind="componentField"
-              :items="uStore.options"
-              :placeholder="t('placeholders.selectAgent')"
-              type="user"
-            />
+            <SelectAgentCombobox v-bind="componentField" />
           </FormControl>
           <FormMessage />
         </FormItem>
       </FormField>
-    </div>
+    </FormGrid>
     <Button type="submit" :isLoading="isLoading">{{ submitLabel }}</Button>
   </form>
 </template>
 
 <script setup>
+import FormGrid from '@shared-ui/components/FormGrid.vue'
 import { ref, watch, computed } from 'vue'
 import { useForm } from 'vee-validate'
 import { toTypedSchema } from '@vee-validate/zod'
 import { Button } from '@shared-ui/components/ui/button/index.js'
 import { Spinner } from '@shared-ui/components/ui/spinner/index.js'
 import { Input } from '@shared-ui/components/ui/input/index.js'
-import { FormControl, FormField, FormItem, FormLabel, FormMessage } from '@shared-ui/components/ui/form/index.js'
+import {
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage
+} from '@shared-ui/components/ui/form/index.js'
 import ActionBuilder from '@/features/admin/macros/ActionBuilder.vue'
-import { useConversationFilters } from '../../../composables/useConversationFilters.js'
-import { useUsersStore } from '../../../stores/users.js'
-import { useTeamStore } from '../../../stores/team.js'
+import { useConversationFilters } from '@main/composables/useConversationFilters.js'
 import { getTextFromHTML } from '@shared-ui/utils/string'
 import { createFormSchema } from './formSchema.js'
-import SelectComboBox from '@main/components/combobox/SelectCombobox.vue'
+import SelectAgentCombobox from '@main/components/combobox/SelectAgentCombobox.vue'
+import SelectTeamCombobox from '@main/components/combobox/SelectTeamCombobox.vue'
 import {
   Select,
   SelectContent,
@@ -166,8 +170,6 @@ import Editor from '@main/components/editor/ConversationEditor.vue'
 const { macroActions } = useConversationFilters()
 const { t } = useI18n()
 const formLoading = ref(false)
-const uStore = useUsersStore()
-const tStore = useTeamStore()
 const props = defineProps({
   initialValues: {
     type: Object,

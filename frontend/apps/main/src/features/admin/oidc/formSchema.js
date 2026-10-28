@@ -1,6 +1,6 @@
 import * as z from 'zod'
 
-export const createFormSchema = (t, { credentialsFromEnv = false } = {}) => z.object({
+export const createFormSchema = (t, { credentialsFromConfig = false } = {}) => z.object({
   disabled: z.boolean().optional(),
   name: z
     .string({
@@ -21,8 +21,8 @@ export const createFormSchema = (t, { credentialsFromEnv = false } = {}) => z.ob
       required_error: t('globals.messages.required'),
     })
     .min(1, { message: t('globals.messages.required') }),
-  // A secret supplied through the environment is not required in the form.
-  client_secret: credentialsFromEnv
+  // A secret set in the server config (oidc.client_secret) is not required in the form.
+  client_secret: credentialsFromConfig
     ? z.string().optional()
     : z
       .string({

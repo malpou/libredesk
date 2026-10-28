@@ -13,10 +13,10 @@ import (
 
 	businesshours "github.com/abhinavxd/libredesk/internal/business_hours"
 	bmodels "github.com/abhinavxd/libredesk/internal/business_hours/models"
+	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
 	cstatusmodels "github.com/abhinavxd/libredesk/internal/conversation/status/models"
 	"github.com/abhinavxd/libredesk/internal/dbutil"
 	"github.com/abhinavxd/libredesk/internal/envelope"
-	notifier "github.com/abhinavxd/libredesk/internal/notification"
 	nmodels "github.com/abhinavxd/libredesk/internal/notification/models"
 	"github.com/abhinavxd/libredesk/internal/sla/models"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
@@ -57,6 +57,16 @@ var metricLabels = map[string]string{
 	MetricNextResponse:  "Next response",
 }
 
+var metricNotificationTypes = map[string]struct{ warning, breach nmodels.NotificationType }{
+	MetricFirstResponse: {nmodels.NotificationTypeSLAFirstResponseWarn, nmodels.NotificationTypeSLAFirstResponseBreach},
+	MetricNextResponse:  {nmodels.NotificationTypeSLANextResponseWarn, nmodels.NotificationTypeSLANextResponseBreach},
+	MetricResolution:    {nmodels.NotificationTypeSLAResolutionWarn, nmodels.NotificationTypeSLAResolutionBreach},
+}
+
+type notificationDispatcher interface {
+	Send(nmodels.Notification) ([]nmodels.DeliveryResult, error)
+}
+
 type Manager struct {
 	q                queries
 	lo               *logf.Logger
@@ -66,7 +76,7 @@ type Manager struct {
 	appSettingsStore appSettingsStore
 	businessHrsStore businessHrsStore
 	template         *template.Manager
-	dispatcher       *notifier.Dispatcher
+	dispatcher       notificationDispatcher
 	wg               sync.WaitGroup
 	opts             Opts
 }
@@ -128,6 +138,7 @@ type queries struct {
 	LockConversations                 *sqlx.Stmt `query:"lock-conversations"`
 	CloseSettledAppliedSLAs           *sqlx.Stmt `query:"close-settled-applied-slas"`
 	UpdateSLANotificationProcessed    *sqlx.Stmt `query:"update-notification-processed"`
+	UpdateSLANotificationRecipients   *sqlx.Stmt `query:"update-notification-recipients"`
 	UpdateSLAEventAsBreached          *sqlx.Stmt `query:"update-sla-event-as-breached"`
 	UpdateSLAEventAsMet               *sqlx.Stmt `query:"update-sla-event-as-met"`
 	SetLatestSLAEventMetAt            *sqlx.Stmt `query:"set-latest-sla-event-met-at"`
@@ -143,7 +154,7 @@ func New(
 	businessHrsStore businessHrsStore,
 	template *template.Manager,
 	userStore userStore,
-	dispatcher *notifier.Dispatcher,
+	dispatcher notificationDispatcher,
 ) (*Manager, error) {
 	var q queries
 	if err := dbutil.ScanSQLFile(
@@ -229,7 +240,7 @@ func (m *Manager) GetDeadlines(startTime time.Time, slaPolicyID, assignedTeamID 
 		return deadlines, err
 	}
 
-	m.lo.Info("calculating deadlines", "timezone", timezone, "business_hours_always_open", businessHrs.IsAlwaysOpen, "business_hours", businessHrs.Hours)
+	m.lo.Debug("calculating deadlines", "timezone", timezone, "business_hours_always_open", businessHrs.IsAlwaysOpen, "business_hours", businessHrs.Hours)
 
 	sla, err := m.Get(slaPolicyID)
 	if err != nil {
@@ -317,7 +328,7 @@ func (m *Manager) CreateNextResponseSLAEvent(conversationID, appliedSLAID, slaPo
 	}
 
 	if slaPolicy.NextResponseTime.String == "" {
-		m.lo.Info("no next response time set for SLA policy, skipping event creation",
+		m.lo.Debug("no next response time set for SLA policy, skipping event creation",
 			"conversation_id", conversationID,
 			"policy_id", slaPolicyID,
 			"applied_sla_id", appliedSLAID,
@@ -425,7 +436,7 @@ func (m *Manager) SetLatestSLAEventMetAt(appliedSLAID int, metric string) (time.
 	)
 	if err := m.q.SetLatestSLAEventMetAt.QueryRow(appliedSLAID, metric).Scan(&metAt, &conversationID); err != nil {
 		if err == sql.ErrNoRows {
-			m.lo.Info("no SLA event found for applied SLA and metric to update `met_at` timestamp", "applied_sla_id", appliedSLAID, "metric", metric)
+			m.lo.Debug("no SLA event found for applied SLA and metric to update `met_at` timestamp", "applied_sla_id", appliedSLAID, "metric", metric)
 			return metAt, ErrLatestSLAEventNotFound
 		}
 		m.lo.Error("error marking SLA event as met", "error", err)
@@ -440,9 +451,8 @@ func (m *Manager) SetLatestSLAEventMetAt(appliedSLAID int, metric string) (time.
 // evaluatePendingSLAEvents fetches pending SLA events, updates their status based on deadlines, and schedules notifications for breached SLAs.
 func (m *Manager) evaluatePendingSLAEvents(ctx context.Context) error {
 	var slaEvents []models.SLAEvent
-	m.lo.Info("fetching pending SLA events")
+	m.lo.Debug("fetching pending SLA events")
 	if err := m.q.GetPendingSLAEvents.SelectContext(ctx, &slaEvents); err != nil {
-		m.lo.Error("error fetching pending SLA events", "error", err)
 		return fmt.Errorf("fetching pending SLA events: %w", err)
 	}
 	if len(slaEvents) > 0 {
@@ -532,7 +542,9 @@ func (m *Manager) runSLAEvaluation(ctx context.Context, interval time.Duration) 
 			return
 		case <-ticker.C:
 			if err := m.evaluatePendingSLAs(ctx); err != nil {
-				m.lo.Error("error processing pending SLAs", "error", err)
+				if !errors.Is(err, context.Canceled) {
+					m.lo.Error("error processing pending SLAs", "error", err)
+				}
 			}
 		}
 	}
@@ -550,7 +562,9 @@ func (m *Manager) runSLAEventEvaluation(ctx context.Context, interval time.Durat
 			return
 		case <-ticker.C:
 			if err := m.evaluatePendingSLAEvents(ctx); err != nil {
-				m.lo.Error("error marking SLA events as breached", "error", err)
+				if !errors.Is(err, context.Canceled) {
+					m.lo.Error("error marking SLA events as breached", "error", err)
+				}
 			}
 		}
 	}
@@ -607,7 +621,7 @@ func (m *Manager) SendNotification(scheduledNotification models.ScheduledSLANoti
 
 	// Any status in the resolved category is terminal for SLA tracking.
 	if appliedSLA.ConversationStatusCategory == cstatusmodels.CategoryResolved {
-		m.lo.Info("marking sla notification as processed as the conversation is in a resolved-category status", "status", appliedSLA.ConversationStatus, "scheduled_notification_id", scheduledNotification.ID)
+		m.lo.Debug("marking sla notification as processed as the conversation is in a resolved-category status", "status", appliedSLA.ConversationStatus, "scheduled_notification_id", scheduledNotification.ID)
 		if _, err := m.q.UpdateSLANotificationProcessed.Exec(scheduledNotification.ID); err != nil {
 			m.lo.Error("error marking notification as processed", "error", err)
 		}
@@ -615,12 +629,12 @@ func (m *Manager) SendNotification(scheduledNotification models.ScheduledSLANoti
 	}
 
 	// Send to all recipients (agents).
-	for _, recipientS := range scheduledNotification.Recipients {
+	for i, recipientS := range scheduledNotification.Recipients {
 		// Check if SLA is already met, if met mark notification as processed and return.
 		switch scheduledNotification.Metric {
 		case MetricFirstResponse:
 			if appliedSLA.FirstResponseMetAt.Valid {
-				m.lo.Info("skipping notification as first response is already met", "applied_sla_id", appliedSLA.ID)
+				m.lo.Debug("skipping notification as first response is already met", "applied_sla_id", appliedSLA.ID)
 				if _, err := m.q.UpdateSLANotificationProcessed.Exec(scheduledNotification.ID); err != nil {
 					m.lo.Error("error marking notification as processed", "error", err)
 				}
@@ -662,18 +676,12 @@ func (m *Manager) SendNotification(scheduledNotification models.ScheduledSLANoti
 
 		// Recipient not found?
 		if recipientID == 0 {
-			if _, err := m.q.UpdateSLANotificationProcessed.Exec(scheduledNotification.ID); err != nil {
-				m.lo.Error("error marking notification as processed", "error", err)
-			}
 			continue
 		}
 
 		agent, err := m.userStore.GetAgent(recipientID, "")
 		if err != nil {
 			m.lo.Error("error fetching agent for SLA notification", "recipient_id", recipientID, "error", err)
-			if _, err := m.q.UpdateSLANotificationProcessed.Exec(scheduledNotification.ID); err != nil {
-				m.lo.Error("error marking notification as processed", "error", err)
-			}
 			continue
 		}
 
@@ -723,46 +731,23 @@ func (m *Manager) SendNotification(scheduledNotification models.ScheduledSLANoti
 			metricLabel = label
 		}
 
-		// Render the email template.
-		content, subject, err := m.template.RenderStoredEmailTemplate(tmpl,
-			map[string]any{
-				"SLA": map[string]any{
-					"DueIn":     dueIn,
-					"OverdueBy": overdueBy,
-					"Metric":    metricLabel,
-				},
-				"Conversation": map[string]any{
-					"ReferenceNumber": appliedSLA.ConversationReferenceNumber,
-					"Subject":         appliedSLA.ConversationSubject,
-					"Priority":        "",
-					"UUID":            appliedSLA.ConversationUUID,
-				},
-				"Recipient": map[string]any{
-					"FirstName": agent.FirstName,
-					"LastName":  agent.LastName,
-					"FullName":  agent.FullName(),
-					"Email":     agent.Email,
-				},
-				// Automated emails do not have an author, so we set empty values.
-				"Author": map[string]any{
-					"FirstName": "",
-					"LastName":  "",
-					"FullName":  "",
-					"Email":     "",
-				},
-			})
+		recipient := nmodels.Recipient{UserID: recipientID}
+		data := slaNotificationTemplateData(appliedSLA, agent, metricLabel, dueIn, overdueBy)
+		content, subject, err := m.template.RenderStoredEmailTemplate(tmpl, data)
 
 		if err != nil {
-			m.lo.Error("error rendering email template", "template", template.TmplConversationAssigned, "scheduled_notification_id", scheduledNotification.ID, "error", err)
-			continue
+			m.lo.Error("error rendering email template", "template", tmpl, "scheduled_notification_id", scheduledNotification.ID, "error", err)
+		} else {
+			recipient.Email = &nmodels.EmailNotification{
+				Recipient: agent.Email.String,
+				Subject:   subject,
+				Content:   content,
+			}
 		}
 
-		// Determine notification type for in-app notification.
-		var notifType nmodels.NotificationType
+		notifType := metricNotificationTypes[scheduledNotification.Metric].warning
 		if scheduledNotification.NotificationType == NotificationTypeBreach {
-			notifType = nmodels.NotificationTypeSLABreach
-		} else {
-			notifType = nmodels.NotificationTypeSLAWarning
+			notifType = metricNotificationTypes[scheduledNotification.Metric].breach
 		}
 
 		notificationTitle := m.i18n.Ts("notification.slaAlert",
@@ -777,25 +762,23 @@ func (m *Manager) SendNotification(scheduledNotification models.ScheduledSLANoti
 			notificationBody = m.i18n.Ts("notification.slaDueIn", "duration", dueIn)
 		}
 
-		// Send notification via dispatcher (handles in-app, WebSocket, and email).
-		m.dispatcher.Send(notifier.Notification{
+		if _, err := m.dispatcher.Send(nmodels.Notification{
 			Type:             notifType,
-			RecipientIDs:     []int{recipientID},
+			Recipients:       []nmodels.Recipient{recipient},
 			Title:            notificationTitle,
 			Body:             null.StringFrom(notificationBody),
 			ConversationID:   null.IntFrom(appliedSLA.ConversationID),
 			ConversationUUID: appliedSLA.ConversationUUID,
-			Email: &notifier.EmailNotification{
-				Recipients: []string{agent.Email.String},
-				Subject:    subject,
-				Content:    content,
-			},
-		})
-
-		// Mark the notification as processed.
-		if _, err := m.q.UpdateSLANotificationProcessed.Exec(scheduledNotification.ID); err != nil {
-			m.lo.Error("error marking notification as processed", "error", err)
+		}); err != nil {
+			// The retry must not re-notify recipients that already got this alert.
+			if _, uerr := m.q.UpdateSLANotificationRecipients.Exec(scheduledNotification.ID, scheduledNotification.Recipients[i:]); uerr != nil {
+				m.lo.Error("error updating pending notification recipients", "scheduled_notification_id", scheduledNotification.ID, "error", uerr)
+			}
+			return fmt.Errorf("sending SLA notification: %w", err)
 		}
+	}
+	if _, err := m.q.UpdateSLANotificationProcessed.Exec(scheduledNotification.ID); err != nil {
+		m.lo.Error("error marking notification as processed", "error", err)
 	}
 	return nil
 }
@@ -865,7 +848,7 @@ func (m *Manager) createNotificationSchedule(notifications models.SlaNotificatio
 			m.lo.Warn("skipping scheduling notification as it is in the past", "send_at", sendAt, "applied_sla_id", appliedSLAID, "metric", metric, "type", notifType)
 			return
 		}
-		m.lo.Info("scheduling SLA notification", "send_at", sendAt, "applied_sla_id", appliedSLAID, "metric", metric, "type", notifType, "recipients", recipients)
+		m.lo.Debug("scheduling SLA notification", "send_at", sendAt, "applied_sla_id", appliedSLAID, "metric", metric, "type", notifType, "recipients", recipients)
 		if _, err := m.q.InsertScheduledSLANotification.Exec(appliedSLAID, slaEventID, metric, notifType, pq.Array(recipients), sendAt); err != nil {
 			m.lo.Error("error inserting scheduled SLA notification", "error", err)
 		}
@@ -915,12 +898,11 @@ func (m *Manager) createNotificationSchedule(notifications models.SlaNotificatio
 // evaluatePendingSLAs fetches pending SLAs and evaluates them, pending SLAs are applied SLAs that have not breached or met yet.
 func (m *Manager) evaluatePendingSLAs(ctx context.Context) error {
 	var pendingSLAs []models.AppliedSLA
-	m.lo.Info("fetching pending applied SLAs")
+	m.lo.Debug("fetching pending applied SLAs")
 	if err := m.q.GetPendingAppliedSLA.SelectContext(ctx, &pendingSLAs); err != nil {
-		m.lo.Error("error fetching pending SLAs", "error", err)
-		return err
+		return fmt.Errorf("fetching pending SLAs: %w", err)
 	}
-	m.lo.Info("fetched pending applied SLAs", "count", len(pendingSLAs))
+	m.lo.Debug("fetched pending applied SLAs", "count", len(pendingSLAs))
 	for _, sla := range pendingSLAs {
 		select {
 		case <-ctx.Done():
@@ -935,8 +917,7 @@ func (m *Manager) evaluatePendingSLAs(ctx context.Context) error {
 	// Now put Applied SLAs to terminal status.
 	var settledConvIDs []int
 	if err := m.q.CloseSettledAppliedSLAs.SelectContext(ctx, &settledConvIDs); err != nil {
-		m.lo.Error("error closing settled SLAs", "error", err)
-		return err
+		return fmt.Errorf("closing settled SLAs: %w", err)
 	}
 	m.recomputeDeadlinesInBatches(settledConvIDs)
 	if len(pendingSLAs) > 0 {
@@ -1048,4 +1029,25 @@ func (m *Manager) recomputeDeadlinesInBatches(conversationIDs []int) {
 			m.lo.Error("error updating conversation next SLA deadlines", "conversation_ids", batch, "error", err)
 		}
 	}
+}
+
+func slaNotificationTemplateData(appliedSLA models.AppliedSLA, recipient umodels.User, metric, dueIn, overdueBy string) map[string]any {
+	conversation := cmodels.Conversation{
+		ReferenceNumber: appliedSLA.ConversationReferenceNumber,
+		Subject:         null.StringFrom(appliedSLA.ConversationSubject),
+		Priority:        appliedSLA.ConversationPriority,
+		UUID:            appliedSLA.ConversationUUID,
+		InboxName:       appliedSLA.ConversationInboxName,
+		InboxChannel:    appliedSLA.ConversationInboxChannel,
+		Contact:         appliedSLA.ConversationContact,
+	}
+	data := template.BuildConversationData(conversation, recipient, umodels.User{} /** author **/)
+	data["Recipient"].(map[string]any)["Email"] = recipient.Email
+	data["Author"].(map[string]any)["FullName"] = ""
+	data["SLA"] = map[string]any{
+		"DueIn":     dueIn,
+		"OverdueBy": overdueBy,
+		"Metric":    metric,
+	}
+	return data
 }

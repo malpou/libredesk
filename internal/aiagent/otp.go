@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
 	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
+	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 )
 
 const (
@@ -46,6 +48,15 @@ func otpSendsKey(convUUID, email string) string {
 }
 
 func otpConvSendsKey(convUUID string) string { return kvstore.Key("sends", convUUID) }
+
+// isContactVerified reports whether the customer on this conversation has proven their identity: a
+// JWT livechat contact is trusted by login, everyone else only within an OTP verification window.
+func (m *Manager) isContactVerified(conv cmodels.Conversation) bool {
+	if conv.InboxChannel != channelEmail && conv.Contact.Type == umodels.UserTypeContact {
+		return true
+	}
+	return m.isConversationVerified(conv.UUID, conv.Contact.Email.String)
+}
 
 // isConversationVerified holds the invariant "verified == the contact's current email is the one
 // proven by OTP": the verified value stores the attested address, and a contact email rebound

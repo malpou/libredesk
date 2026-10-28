@@ -9,6 +9,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/kvstore"
 	realip "github.com/ferluci/fast-realip"
 	"github.com/valyala/fasthttp"
+	"github.com/zerodha/logf"
 )
 
 // window is the length of one rate limit window.
@@ -25,12 +26,14 @@ type Rule struct {
 type Limiter struct {
 	store *kvstore.Store
 	rules map[string]Rule
+	lo    *logf.Logger
 }
 
 // New creates a new rate limiter.
-func New(store *kvstore.Store) *Limiter {
+func New(store *kvstore.Store, lo *logf.Logger) *Limiter {
 	return &Limiter{
 		store: store,
+		lo:    lo,
 		rules: make(map[string]Rule),
 	}
 }
@@ -58,6 +61,7 @@ func (l *Limiter) Check(ctx *fasthttp.RequestCtx, ruleName string) error {
 	defer cancel()
 	count, err := l.store.Incr(sctx, key, 2*window)
 	if err != nil {
+		l.lo.Warn("rate limit check unavailable, allowing request", "rule", ruleName, "error", err)
 		return nil
 	}
 

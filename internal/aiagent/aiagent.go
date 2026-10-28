@@ -16,6 +16,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/conversation"
 	"github.com/abhinavxd/libredesk/internal/dbutil"
 	"github.com/abhinavxd/libredesk/internal/envelope"
+	"github.com/abhinavxd/libredesk/internal/inbox"
 	"github.com/abhinavxd/libredesk/internal/kvstore"
 	"github.com/abhinavxd/libredesk/internal/media"
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
@@ -68,6 +69,7 @@ type Manager struct {
 	i18n     *i18n.I18n
 	ai       *ai.Manager
 	convo    *conversation.Manager
+	inbox    *inbox.Manager
 	media    *media.Manager
 	setting  *setting.Manager
 	user     *user.Manager
@@ -110,7 +112,7 @@ type Opts struct {
 }
 
 // New creates the AI agent manager.
-func New(opts Opts, aiManager *ai.Manager, convo *conversation.Manager, mediaManager *media.Manager, settingManager *setting.Manager, userManager *user.Manager, notifierService *notifier.Service, otpPending, otpState *kvstore.Store) (*Manager, error) {
+func New(opts Opts, aiManager *ai.Manager, convo *conversation.Manager, inboxManager *inbox.Manager, mediaManager *media.Manager, settingManager *setting.Manager, userManager *user.Manager, notifierService *notifier.Service, otpPending, otpState *kvstore.Store) (*Manager, error) {
 	var q queries
 	if err := dbutil.ScanSQLFile("queries.sql", &q, opts.DB, efs); err != nil {
 		return nil, err
@@ -124,6 +126,7 @@ func New(opts Opts, aiManager *ai.Manager, convo *conversation.Manager, mediaMan
 		maxHistoryMessages: opts.MaxHistoryMessages,
 		ai:                 aiManager,
 		convo:              convo,
+		inbox:              inboxManager,
 		media:              mediaManager,
 		setting:            settingManager,
 		user:               userManager,
@@ -232,6 +235,7 @@ func (m *Manager) statWindow(a models.Assistant, start, end time.Time) (models.S
 
 // recordEvent logs a handoff/resolve marker so rate and reopen metrics are queryable.
 func (m *Manager) recordEvent(assistantID, conversationID int, eventType string) {
+	m.lo.Info("ai agent decision", "assistant_id", assistantID, "conversation_id", conversationID, "decision", eventType)
 	if _, err := m.q.InsertAIAgentEvent.Exec(assistantID, conversationID, eventType); err != nil {
 		m.lo.Error("error recording ai agent event", "type", eventType, "error", err)
 	}
@@ -280,7 +284,7 @@ func (m *Manager) CreateAssistant(a models.Assistant) (models.Assistant, error) 
 	}
 
 	var id int
-	if err := tx.Stmtx(m.q.InsertAssistant).QueryRow(userID, a.Description, a.Instructions, a.Guardrails, a.Tone, a.ResponseLength, a.MaxTurns, a.FallbackTeamID, a.Enabled, a.Expectation, a.HandoffEnabled, a.Languages).Scan(&id); err != nil {
+	if err := tx.Stmtx(m.q.InsertAssistant).QueryRow(userID, a.Description, a.Instructions, a.Guardrails, a.Tone, a.ResponseLength, a.MaxTurns, a.FallbackTeamID, a.Enabled, a.Expectation, a.HandoffEnabled, a.Languages, a.CitationsEnabled).Scan(&id); err != nil {
 		m.lo.Error("error creating assistant", "error", err)
 		return models.Assistant{}, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
@@ -317,7 +321,7 @@ func (m *Manager) UpdateAssistant(id int, a models.Assistant) (models.Assistant,
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Stmtx(m.q.UpdateAssistant).Exec(id, a.Description, a.Instructions, a.Guardrails, a.Tone, a.ResponseLength, a.MaxTurns, a.FallbackTeamID, a.Enabled, a.Expectation, a.HandoffEnabled, a.Languages); err != nil {
+	if _, err := tx.Stmtx(m.q.UpdateAssistant).Exec(id, a.Description, a.Instructions, a.Guardrails, a.Tone, a.ResponseLength, a.MaxTurns, a.FallbackTeamID, a.Enabled, a.Expectation, a.HandoffEnabled, a.Languages, a.CitationsEnabled); err != nil {
 		m.lo.Error("error updating assistant", "error", err)
 		return models.Assistant{}, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}

@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-6" :class="{ 'box p-5': actions.length > 0 }">
+  <div class="box p-5 space-y-6">
     <div class="space-y-6">
       <div v-for="(action, index) in actions" :key="index" class="space-y-6">
         <div v-if="index > 0">
@@ -9,7 +9,7 @@
         <div class="space-y-3">
           <div class="flex items-start justify-between gap-5">
             <div class="flex gap-5 flex-1 min-w-0">
-              <div class="w-56 shrink-0">
+              <div :class="fieldClass">
                 <!-- Type -->
                 <Select
                   v-model="action.type"
@@ -32,27 +32,31 @@
                 </Select>
               </div>
 
+              <div
+                v-if="action.type && conversationActions[action.type]?.type === 'richtext'"
+                class="flex self-center"
+              >
+                <HelpPopover :text="messageVariablesHelp" />
+              </div>
+
               <!-- Value -->
               <div
                 v-if="action.type && conversationActions[action.type]?.type === 'tag'"
-                class="flex-1 min-w-0"
+                class="flex-1 min-w-0 max-w-md"
               >
-                <SelectTag
-                  v-model="action.value"
-                  :items="tagsStore.tagNames.map((tag) => ({ label: tag, value: tag }))"
-                  :placeholder="t('placeholders.selectTags')"
-                />
+                <SelectTagCombobox multiple v-model="action.value" />
               </div>
 
               <div
                 v-if="action.type && conversationActions[action.type]?.type === 'recipients'"
-                class="flex-1 min-w-0 space-y-3"
+                class="flex-1 min-w-0 max-w-md space-y-3"
               >
                 <SelectTag
                   :modelValue="action.recipients || []"
                   @update:modelValue="(value) => handleNotifyRecipientsChange(value, index)"
                   :items="notifyRecipientOptions"
                   :placeholder="t('placeholders.selectRecipients')"
+                  :search="searchRecipients"
                 />
                 <Input
                   type="text"
@@ -69,20 +73,30 @@
               </div>
 
               <div
-                class="flex-1 min-w-0"
+                :class="fieldClass"
                 v-if="action.type && conversationActions[action.type]?.type === 'select'"
               >
+                <SelectAgentCombobox
+                  v-if="action.type === 'assign_user'"
+                  v-model="action.value[0]"
+                  @select="handleValueChange($event, index)"
+                />
+                <SelectTeamCombobox
+                  v-else-if="action.type === 'assign_team'"
+                  v-model="action.value[0]"
+                  @select="handleValueChange($event, index)"
+                />
                 <SelectComboBox
+                  v-else
                   v-model="action.value[0]"
                   :items="conversationActions[action.type]?.options"
                   :placeholder="t('placeholders.selectValue')"
                   @select="handleValueChange($event, index)"
-                  :type="action.type === 'assign_user' ? 'user' : 'team'"
                 />
               </div>
 
               <div
-                class="flex gap-3 flex-1 min-w-0"
+                class="flex gap-3 flex-1 min-w-0 max-w-2xl"
                 v-if="action.type && conversationActions[action.type]?.type === 'webhook'"
               >
                 <div class="flex-1 min-w-0">
@@ -107,7 +121,7 @@
               </div>
 
               <div
-                class="flex-1 min-w-0"
+                :class="fieldClass"
                 v-if="action.type && conversationActions[action.type]?.type === 'text'"
               >
                 <Input
@@ -145,12 +159,11 @@
 </template>
 
 <script setup>
-import { toRefs, computed } from 'vue'
+import { toRefs, computed, watch, onMounted } from 'vue'
 import { Button } from '@shared-ui/components/ui/button'
 import { Input } from '@shared-ui/components/ui/input'
 import { Textarea } from '@shared-ui/components/ui/textarea'
 import CloseButton from '@main/components/button/CloseButton.vue'
-import { useTagStore } from '@main/stores/tag'
 import { useWebhookStore } from '@main/stores/webhook'
 import { useUsersStore } from '@main/stores/users'
 import { useTeamStore } from '@main/stores/team'
@@ -163,11 +176,15 @@ import {
   SelectValue
 } from '@shared-ui/components/ui/select'
 import { SelectTag } from '@shared-ui/components/ui/select'
+import HelpPopover from '@main/components/HelpPopover.vue'
 import { useConversationFilters } from '@main/composables/useConversationFilters'
-import { getTextFromHTML } from '@shared-ui/utils/string'
+import { getTextFromHTML, formatTemplateVariables } from '@shared-ui/utils/string'
 import { useI18n } from 'vue-i18n'
 import Editor from '@main/components/editor/ConversationEditor.vue'
 import SelectComboBox from '@main/components/combobox/SelectCombobox.vue'
+import SelectAgentCombobox from '@main/components/combobox/SelectAgentCombobox.vue'
+import SelectTeamCombobox from '@main/components/combobox/SelectTeamCombobox.vue'
+import SelectTagCombobox from '@main/components/combobox/SelectTagCombobox.vue'
 
 const props = defineProps({
   actions: {
@@ -176,29 +193,90 @@ const props = defineProps({
   }
 })
 
+const fieldClass = 'flex-1 min-w-0 max-w-xs'
+
+// Automations send as the System user, so the Author fields would render blank.
+const MESSAGE_VARIABLES = [
+  '.Conversation.ReferenceNumber',
+  '.Conversation.Subject',
+  '.Conversation.Priority',
+  '.Contact.FirstName',
+  '.Contact.LastName',
+  '.Contact.FullName',
+  '.Contact.Email',
+  '.Inbox.Name'
+]
+
 const { actions } = toRefs(props)
 const { t } = useI18n()
 const emit = defineEmits(['update-actions', 'add-action', 'remove-action'])
-const tagsStore = useTagStore()
 const webhookStore = useWebhookStore()
 const uStore = useUsersStore()
 const tStore = useTeamStore()
 const { conversationActions } = useConversationFilters()
+const messageVariablesHelp = computed(
+  () => `${t('globals.terms.variable', 2)}: ${formatTemplateVariables(MESSAGE_VARIABLES)}`
+)
 
 webhookStore.fetchWebhooks()
 
-const notifyRecipientOptions = computed(() => [
+const recipientKeywords = computed(() => [
   { label: t('globals.terms.assignee'), value: 'assignee' },
-  { label: t('globals.terms.assignedTeam'), value: 'assigned_team' },
-  ...tStore.options.map((o) => ({
+  { label: t('globals.terms.assignedTeam'), value: 'assigned_team' }
+])
+
+const toTeamRecipients = (options) => options.map((o) => ({
     label: `${t('globals.terms.team')}: ${o.label}`,
     value: `team:${o.value}`
-  })),
-  ...uStore.options.map((o) => ({
+  }))
+
+const toUserRecipients = (options) => options.map((o) => ({
     label: `${t('globals.terms.agent')}: ${o.label}`,
     value: `user:${o.value}`
   }))
+
+const notifyRecipientOptions = computed(() => [
+  ...recipientKeywords.value,
+  ...toTeamRecipients(tStore.options),
+  ...toUserRecipients(uStore.options)
 ])
+
+const searchRecipients = async (query) => {
+  const [teams, users] = await Promise.all([
+    tStore.searchTeams(query),
+    uStore.searchUsers(query)
+  ])
+  return [
+    ...recipientKeywords.value,
+    ...toTeamRecipients(teams),
+    ...toUserRecipients(users)
+  ]
+}
+
+// Recipients are prefixed, e.g. "user:12" / "team:3", alongside keywords like "assignee".
+const recipientIDs = (prefix) =>
+  actions.value.flatMap((action) =>
+    (action.recipients || [])
+      .filter((r) => typeof r === 'string' && r.startsWith(prefix + ':'))
+      .map((r) => r.slice(prefix.length + 1))
+  )
+
+onMounted(() => {
+  uStore.fetchUsers()
+  tStore.fetchTeams()
+})
+
+// Keyed on the ids alone: a deep watch on actions would refire on every subject/message keystroke.
+const recipientIDKey = computed(() => JSON.stringify([recipientIDs('user'), recipientIDs('team')]))
+
+watch(
+  recipientIDKey,
+  () => {
+    uStore.ensureUserIDs(recipientIDs('user'))
+    tStore.ensureTeamIDs(recipientIDs('team'))
+  },
+  { immediate: true }
+)
 
 const handleNotifyRecipientsChange = (value, index) => {
   actions.value[index].recipients = value || []

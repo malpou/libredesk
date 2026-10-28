@@ -232,7 +232,7 @@ func (t *searchContactsTool) Execute(ctx context.Context, args string) (string, 
 	if !allowed {
 		return "You do not have permission to search contacts.", nil
 	}
-	results, err := t.app.search.Contacts(email)
+	results, err := t.app.search.Contacts(email, maxContactSearchLimit)
 	if err != nil {
 		return "", err
 	}
@@ -242,7 +242,7 @@ func (t *searchContactsTool) Execute(ctx context.Context, args string) (string, 
 	var b strings.Builder
 	for i, r := range results {
 		name := strings.TrimSpace(r.FirstName + " " + r.LastName)
-		fmt.Fprintf(&b, "%d. %s | Email: %s | Contact ID: %d\n", i+1, name, r.Email, r.ID)
+		fmt.Fprintf(&b, "%d. %s | Email: %s | Contact ID: %d\n", i+1, name, r.Email.String, r.ID)
 	}
 	return b.String(), nil
 }

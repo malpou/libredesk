@@ -27,7 +27,7 @@
 // Real login as the System user. Caches the session (and the csrf_token cookie
 // the backend sets on login) across specs so subsequent writes don't 403.
 Cypress.Commands.add('login', () => {
-  const email = 'System'
+  const email = Cypress.env('SYSTEM_EMAIL') || 'System'
   const password = Cypress.env('SYSTEM_PASSWORD') || 'StrongPass!123'
   cy.session(
     'system-agent',
@@ -45,9 +45,20 @@ Cypress.Commands.add('login', () => {
       }
     }
   )
+  cy.clearLocalStorage('replyBoxMinimized')
 })
 
-// Pick an option from a shadcn/radix Select by the label currently on its trigger.
+Cypress.Commands.add('setEmailInboxSection', (section, open) => {
+  cy.get(`[data-section="${section}"] > h3 > button`).then(($trigger) => {
+    if ($trigger.attr('aria-expanded') !== String(open)) cy.wrap($trigger).click()
+  })
+})
+
+Cypress.Commands.add('toggleEmailInboxAdvanced', (connection) => {
+  cy.setEmailInboxSection(connection, true)
+  cy.get(`[data-connection="${connection}"]`).contains('button', 'Advanced').click()
+})
+
 Cypress.Commands.add('selectOption', (triggerLabel, optionText) => {
   cy.contains('button[role="combobox"]', triggerLabel).click()
   cy.get('[role="option"]').contains(optionText).click()

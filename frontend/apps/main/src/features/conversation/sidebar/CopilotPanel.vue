@@ -2,56 +2,75 @@
   <div class="flex flex-col h-full min-h-0">
     <div
       v-if="assistants.length || messages.length"
-      class="flex items-center justify-between gap-2 border-b border-border px-3 py-2"
+      class="flex min-w-0 items-center justify-between gap-2 border-b border-border px-3 py-2"
     >
       <Select
         v-if="assistants.length"
         :model-value="selectedAssistantId"
         @update:model-value="persistAssistant"
       >
-        <SelectTrigger class="h-8 w-auto gap-1.5 border-0 shadow-none text-muted-foreground focus:ring-0">
-          <SelectValue :placeholder="COPILOT_NAME" />
+        <SelectTrigger
+          class="h-7 min-w-0 w-auto max-w-full gap-1.5 border-0 px-2 py-1 text-xs sm:text-xs shadow-none text-muted-foreground"
+        >
+          <SelectValue class="min-w-0 truncate" :placeholder="COPILOT_NAME" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent class="w-56">
           <SelectItem :value="0">{{ COPILOT_NAME }}</SelectItem>
-          <SelectItem v-for="a in assistants" :key="a.id" :value="a.id">{{ a.name }}</SelectItem>
+          <SelectItem
+            v-for="a in assistants"
+            :key="a.id"
+            :value="a.id"
+            class="whitespace-normal break-words"
+            >{{ a.name }}</SelectItem
+          >
         </SelectContent>
       </Select>
       <span v-else />
-      <Button
-        v-if="messages.length"
-        type="button"
-        variant="ghost"
-        size="sm"
-        class="gap-1.5 text-muted-foreground"
-        @click="clearChat"
-      >
-        <Eraser class="h-3.5 w-3.5" />
-        {{ $t('copilot.clearChat') }}
-      </Button>
+      <Tooltip v-if="messages.length">
+        <TooltipTrigger as-child>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            class="group h-7 w-7 shrink-0 text-muted-foreground [&_svg]:size-3.5"
+            :aria-label="$t('copilot.clearChat')"
+            @click="clearChat"
+          >
+            <Eraser
+              class="opacity-50 transition-opacity can-hover:group-hover:opacity-100 group-focus-visible:opacity-100"
+              aria-hidden="true"
+            />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ $t('copilot.clearChat') }}</TooltipContent>
+      </Tooltip>
     </div>
     <div ref="scrollRef" class="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+      <div v-if="isHydrating" class="h-full flex items-center justify-center text-muted-foreground">
+        <DotLoader />
+        <span class="sr-only">{{ $t('globals.terms.loading') }}</span>
+      </div>
       <div
-        v-if="messages.length === 0"
+        v-else-if="messages.length === 0"
         class="h-full flex flex-col items-center justify-center gap-4 text-center px-4"
       >
-        <div class="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-          <Bot class="h-6 w-6 text-primary" />
+        <div class="juno-avatar h-12 w-12 rounded-full flex items-center justify-center">
+          <JunoIcon class="size-8 text-primary" />
         </div>
         <div class="space-y-1">
-          <p class="text-sm font-medium text-foreground">{{ COPILOT_NAME }}</p>
-          <p class="text-xs text-muted-foreground">
+          <p class="ui-heading">{{ COPILOT_NAME }}</p>
+          <p class="ui-description">
             {{ $t('copilot.emptyState', { name: COPILOT_NAME }) }}
           </p>
         </div>
-        <div class="flex flex-col gap-1.5 w-full max-w-[85%]">
+        <div class="flex w-full flex-col gap-2">
           <Button
             v-for="preset in presets"
             :key="preset"
             type="button"
             variant="outline"
-            size="sm"
-            class="w-full justify-start whitespace-normal h-auto py-1.5 font-normal text-muted-foreground"
+            size="default"
+            class="h-auto min-h-9 w-full justify-start whitespace-normal text-left font-normal"
             @click="send(preset)"
           >
             {{ preset }}
@@ -64,17 +83,44 @@
         class="flex gap-2"
         :class="msg.isUser ? 'justify-end' : 'justify-start'"
       >
-        <div
-          v-if="!msg.isUser"
-          class="mt-0.5 h-6 w-6 shrink-0 rounded-full bg-primary/10 flex items-center justify-center"
-        >
-          <Bot class="h-3.5 w-3.5 text-primary" />
+        <div v-if="!msg.isUser" :class="JUNO_ICON_CLASS">
+          <JunoIcon class="size-4 text-primary" />
         </div>
         <div
           class="flex flex-col gap-1 max-w-[85%]"
           :class="msg.isUser ? 'items-end' : 'items-start'"
         >
           <div
+            v-if="msg.approval"
+            class="w-full space-y-3 rounded-lg border border-border bg-card p-3 text-card-foreground"
+            role="group"
+            aria-live="polite"
+            :aria-label="$t('ai.toolApprovalTitle')"
+          >
+            <p class="ui-subheading">{{ $t('ai.toolApprovalTitle') }}</p>
+            <ToolApprovalDetails :approval="msg.approval" />
+            <div class="flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                :disabled="isThinking"
+                @click="resolveToolApproval(msg.approval, false)"
+              >
+                {{ $t('globals.messages.reject') }}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                :disabled="isThinking"
+                @click="resolveToolApproval(msg.approval, true)"
+              >
+                {{ $t('globals.messages.approveAndRun') }}
+              </Button>
+            </div>
+          </div>
+          <div
+            v-else
             class="rounded-lg px-3 py-2 text-sm [overflow-wrap:anywhere]"
             :class="
               msg.isUser
@@ -85,7 +131,7 @@
             <Letter v-if="!msg.isUser" :html="msg.content" class="native-html" />
             <template v-else>{{ msg.content }}</template>
           </div>
-          <div v-if="!msg.isUser && msg.content" class="flex gap-0.5">
+          <div v-if="!msg.isUser && !msg.approval && msg.content" class="flex gap-0.5">
             <Tooltip>
               <TooltipTrigger as-child>
                 <Button
@@ -100,7 +146,7 @@
               </TooltipTrigger>
               <TooltipContent>{{ $t('globals.terms.copy') }}</TooltipContent>
             </Tooltip>
-            <Tooltip>
+            <Tooltip v-if="canSendReply">
               <TooltipTrigger as-child>
                 <Button
                   type="button"
@@ -114,7 +160,7 @@
               </TooltipTrigger>
               <TooltipContent>{{ $t('copilot.insertIntoReply') }}</TooltipContent>
             </Tooltip>
-            <Tooltip>
+            <Tooltip v-if="canSendPrivateNote">
               <TooltipTrigger as-child>
                 <Button
                   type="button"
@@ -131,16 +177,19 @@
           </div>
         </div>
       </div>
-      <div v-if="isThinking" class="flex gap-2 justify-start">
-        <div
-          class="mt-0.5 h-6 w-6 shrink-0 rounded-full bg-primary/10 flex items-center justify-center"
-        >
-          <Bot class="h-3.5 w-3.5 text-primary" />
+      <div v-if="isThinking" class="flex gap-2 justify-start" role="status">
+        <div :class="JUNO_ICON_CLASS">
+          <JunoIcon class="size-4 text-primary" />
         </div>
-        <div class="rounded-lg px-3 py-2 bg-muted text-muted-foreground flex items-center">
-          <DotLoader />
-          <span class="sr-only">{{ $t('copilot.thinking') }}</span>
+        <div class="min-w-0 flex-1 max-w-[85%] space-y-3 py-2.5" aria-hidden="true">
+          <Skeleton
+            v-for="width in THINKING_LINE_WIDTHS"
+            :key="width"
+            class="juno-thinking-line h-2.5 animate-none rounded-full"
+            :class="width"
+          />
         </div>
+        <span class="sr-only">{{ $t('copilot.thinking') }}</span>
       </div>
     </div>
 
@@ -161,8 +210,13 @@
 </template>
 
 <script setup>
+const JUNO_ICON_CLASS =
+  'juno-avatar mt-0.5 h-6 w-6 shrink-0 rounded-full flex items-center justify-center'
+const THINKING_LINE_WIDTHS = ['w-full', 'w-4/5', 'w-3/5']
+
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import { Button } from '@shared-ui/components/ui/button'
+import ToolApprovalDetails from '@/features/conversation/ToolApprovalDetails.vue'
 import {
   Select,
   SelectContent,
@@ -171,32 +225,36 @@ import {
   SelectValue
 } from '@shared-ui/components/ui/select'
 import { Textarea } from '@shared-ui/components/ui/textarea'
+import { Skeleton } from '@shared-ui/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@shared-ui/components/ui/tooltip'
 import { Letter } from 'vue-letter'
 import { DotLoader } from '@shared-ui/components/ui/loader'
-import { Eraser, Bot, Copy, Reply, StickyNote } from 'lucide-vue-next'
+import { Eraser, Copy, Reply, StickyNote } from 'lucide-vue-next'
+import JunoIcon from './JunoIcon.vue'
 import { useConversationStore } from '@/stores/conversation'
 import { useCopilotStore } from '@/stores/copilot'
 import { useAIAssistantStore } from '@/stores/aiAssistant'
+import { useUserStore } from '@/stores/user'
 import { useEmitter } from '@/composables/useEmitter'
 import { EMITTER_EVENTS } from '@/constants/emitterEvents.js'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { getTextFromHTML } from '@shared-ui/utils/string.js'
 import { UserTypeAgent } from '@/constants/user'
 import { COPILOT_NAME } from '@/constants/copilot'
+import { permissions as perms } from '@/constants/permissions.js'
 import { useI18n } from 'vue-i18n'
 import api from '@/api'
 
 const conversationStore = useConversationStore()
 const copilotStore = useCopilotStore()
 const aiAssistantStore = useAIAssistantStore()
+const userStore = useUserStore()
 const emitter = useEmitter()
 const { t } = useI18n()
+const canSendReply = computed(() => userStore.can(perms.MESSAGES_WRITE))
+const canSendPrivateNote = computed(() => userStore.can(perms.MESSAGES_WRITE_PRIVATE))
 
-const presets = computed(() => [
-  t('copilot.preset.summarize'),
-  t('copilot.preset.customerAsking')
-])
+const presets = computed(() => [t('copilot.preset.summarize'), t('copilot.preset.nextStep')])
 
 // Chat history lives in the store keyed by conversation uuid so it survives tab
 // switches (this panel unmounts) and never leaks across conversations.
@@ -209,6 +267,7 @@ const input = ref('')
 // Thinking state is per conversation so an in-flight send for one conversation does not show or
 // block the panel after the agent switches to another.
 const thinkingByUUID = ref({})
+const isHydrating = ref(true)
 const isThinking = computed(() => !!thinkingByUUID.value[conversationStore.current?.uuid || ''])
 const scrollRef = ref(null)
 
@@ -259,18 +318,36 @@ const clearChat = async () => {
 // Load the persisted chat from the server when a conversation opens, so a refresh
 // does not lose it. Skip if the store already has messages for it (a live session).
 const hydrate = async (uuid) => {
-  if (!uuid || copilotStore.getMessages(uuid).length > 0) return
+  if (!uuid) {
+    isHydrating.value = false
+    return
+  }
+  if (copilotStore.getMessages(uuid).length > 0) {
+    isHydrating.value = false
+    return
+  }
   const rev = revision(uuid)
+  let staleHydrate = false
+  isHydrating.value = true
   try {
     const resp = await api.getCopilotMessages(uuid)
-    if (rev !== revision(uuid) || copilotStore.getMessages(uuid).length > 0) return
-    const loaded = (resp.data.data || []).map((m) => ({ role: m.role, content: m.content }))
+    if (rev !== revision(uuid) || copilotStore.getMessages(uuid).length > 0) {
+      staleHydrate = true
+      return
+    }
+    const loaded = (resp.data.data || []).map((m) => ({
+      role: m.role,
+      content: m.content,
+      approval: m.approval
+    }))
     if (loaded.length) {
       copilotStore.setMessages(uuid, loaded)
       await scrollToBottom()
     }
   } catch {
     // Non-fatal: the panel still works without history.
+  } finally {
+    if (!staleHydrate) isHydrating.value = false
   }
 }
 
@@ -295,7 +372,10 @@ const send = async (preset) => {
   const uuid = conversationStore.current?.uuid || ''
   if (!uuid) return
   const rev = revision(uuid)
-  copilotStore.setMessages(uuid, [...copilotStore.getMessages(uuid), { role: 'user', content: text }])
+  copilotStore.setMessages(uuid, [
+    ...copilotStore.getMessages(uuid).filter((message) => !message.approval),
+    { role: 'user', content: text }
+  ])
   input.value = ''
   thinkingByUUID.value[uuid] = true
   await scrollToBottom()
@@ -305,15 +385,57 @@ const send = async (preset) => {
     if (selectedAssistantId.value > 0) payload.assistant_id = selectedAssistantId.value
     const resp = await api.aiCopilot(payload)
     if (rev !== revision(uuid)) return
-    copilotStore.setMessages(uuid, [
-      ...copilotStore.getMessages(uuid),
-      { role: 'assistant', content: resp.data.data || '' }
-    ])
+    const result = resp.data.data
+    const message =
+      result.status === 'approval_required'
+        ? { role: 'approval', approval: result.approval }
+        : { role: 'assistant', content: result.content || '' }
+    copilotStore.setMessages(uuid, [...copilotStore.getMessages(uuid), message])
   } catch (error) {
     // A rejected persona (deleted or disabled since selection) comes back as an input error; fall back
     // to the default Copilot so the next send works.
     if (error?.response?.data?.error?.type === 'InputException' && selectedAssistantId.value > 0) {
       persistAssistant(0)
+    }
+    emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
+      variant: 'destructive',
+      description: handleHTTPError(error).message
+    })
+  } finally {
+    delete thinkingByUUID.value[uuid]
+    await scrollToBottom()
+  }
+}
+
+const resolveToolApproval = async (approval, approved) => {
+  const uuid = conversationStore.current?.uuid || ''
+  if (!uuid || isThinking.value) return
+  const rev = revision(uuid)
+  thinkingByUUID.value[uuid] = true
+  try {
+    const resp = approved
+      ? await api.approveAIToolRun(approval.run_id)
+      : await api.declineAIToolRun(approval.run_id)
+    if (rev !== revision(uuid)) return
+    const result = resp.data.data
+    const replacement =
+      result.status === 'approval_required'
+        ? { role: 'approval', approval: result.approval }
+        : { role: 'assistant', content: result.content || '' }
+    copilotStore.setMessages(
+      uuid,
+      copilotStore
+        .getMessages(uuid)
+        .map((message) => (message.approval?.run_id === approval.run_id ? replacement : message))
+    )
+  } catch (error) {
+    if ([403, 404, 409].includes(error?.response?.status)) {
+      copilotStore.setMessages(
+        uuid,
+        copilotStore
+          .getMessages(uuid)
+          .filter((message) => message.approval?.run_id !== approval.run_id)
+      )
     }
     emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
       variant: 'destructive',
@@ -338,10 +460,12 @@ const copyAnswer = async (content) => {
 }
 
 const insertIntoReply = (content) => {
+  if (!canSendReply.value) return
   emitter.emit(EMITTER_EVENTS.COPILOT_INSERT_REPLY, content)
 }
 
 const addAsPrivateNote = async (content) => {
+  if (!canSendPrivateNote.value) return
   const uuid = conversationStore.current?.uuid || ''
   if (!uuid) return
   const rev = revision(uuid)
@@ -367,3 +491,53 @@ const addAsPrivateNote = async (content) => {
   }
 }
 </script>
+
+<style scoped>
+.juno-avatar {
+  background: radial-gradient(circle at 30% 25%, hsl(var(--primary) / 0.22), transparent 65%),
+    linear-gradient(135deg, hsl(var(--primary) / 0.12), hsl(var(--success) / 0.12));
+}
+
+.juno-thinking-line {
+  position: relative;
+  overflow: hidden;
+}
+
+.juno-thinking-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 10%,
+    hsl(var(--primary) / 0.12) 30%,
+    hsl(var(--primary) / 0.38) 50%,
+    hsl(var(--success) / 0.18) 65%,
+    transparent 90%
+  );
+  transform: translateX(-100%);
+  animation: juno-thinking-sweep 2.4s linear infinite;
+}
+
+.juno-thinking-line:nth-child(2)::after {
+  animation-delay: 80ms;
+}
+
+.juno-thinking-line:nth-child(3)::after {
+  animation-delay: 160ms;
+}
+
+@keyframes juno-thinking-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .juno-thinking-line::after {
+    animation: none;
+    transform: none;
+    opacity: 0.6;
+  }
+}
+</style>

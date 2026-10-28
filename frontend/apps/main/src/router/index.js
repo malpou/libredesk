@@ -1,17 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import App from '@main/App.vue'
-import OuterApp from '@main/OuterApp.vue'
-import InboxLayout from '@main/layouts/inbox/InboxLayout.vue'
-import AccountLayout from '@main/layouts/account/AccountLayout.vue'
-import AdminLayout from '@main/layouts/admin/AdminLayout.vue'
-import { useAppSettingsStore } from '../stores/appSettings'
-import { getI18n } from '../i18n'
-import { abortRouteScope } from '../api'
+import { useAppSettingsStore } from '@main/stores/appSettings'
+import { getI18n } from '@main/i18n'
+import { abortRouteScope } from '@main/api'
 
 const routes = [
   {
     path: '/',
-    component: OuterApp,
+    component: () => import('@main/OuterApp.vue'),
     children: [
       {
         path: '',
@@ -35,7 +30,7 @@ const routes = [
   },
   {
     path: '/',
-    component: App,
+    component: () => import('@main/App.vue'),
     children: [
       {
         path: 'contacts',
@@ -66,7 +61,7 @@ const routes = [
         path: '/inboxes/teams/:teamID',
         name: 'teams',
         props: true,
-        component: InboxLayout,
+        component: () => import('@main/layouts/inbox/InboxLayout.vue'),
         meta: { titleKey: 'globals.terms.teamInbox', hidePageHeader: true },
         children: [
           {
@@ -90,7 +85,7 @@ const routes = [
         path: '/inboxes/views/:viewID',
         name: 'views',
         props: true,
-        component: InboxLayout,
+        component: () => import('@main/layouts/inbox/InboxLayout.vue'),
         meta: { titleKey: 'globals.terms.view', hidePageHeader: true },
         children: [
           {
@@ -120,7 +115,7 @@ const routes = [
         path: '/inboxes/:type(assigned|unassigned|all|mentioned)?',
         name: 'inboxes',
         redirect: '/inboxes/assigned',
-        component: InboxLayout,
+        component: () => import('@main/layouts/inbox/InboxLayout.vue'),
         props: true,
         meta: { titleKey: 'globals.terms.inbox', hidePageHeader: true },
         children: [
@@ -164,7 +159,7 @@ const routes = [
         path: '/account/:page?',
         name: 'account',
         redirect: '/account/profile',
-        component: AccountLayout,
+        component: () => import('@main/layouts/account/AccountLayout.vue'),
         props: true,
         meta: { titleKey: 'globals.terms.account' },
         children: [
@@ -173,13 +168,20 @@ const routes = [
             name: 'profile',
             component: () => import('@main/views/account/profile/ProfileEditView.vue'),
             meta: { titleKey: 'account.editProfile' }
+          },
+          {
+            path: 'notifications',
+            name: 'account-notifications',
+            component: () =>
+              import('@main/views/account/notifications/NotificationPreferences.vue'),
+            meta: { titleKey: 'globals.terms.notification', titleCount: 2 }
           }
         ]
       },
       {
         path: '/admin',
         name: 'admin',
-        component: AdminLayout,
+        component: () => import('@main/layouts/admin/AdminLayout.vue'),
         meta: { titleKey: 'globals.terms.admin' },
         children: [
           {
@@ -235,6 +237,12 @@ const routes = [
             name: 'ai-snippets',
             component: () => import('@main/views/admin/ai/AISnippets.vue'),
             meta: { titleKey: 'admin.ai.snippets', titleCount: 2 }
+          },
+          {
+            path: 'ai/editor-prompts',
+            name: 'ai-editor-prompts',
+            component: () => import('@main/views/admin/ai/AIEditorPrompts.vue'),
+            meta: { titleKey: 'admin.ai.editorPrompts', titleCount: 2 }
           },
           {
             path: 'ai/suggestions',
@@ -354,6 +362,30 @@ const routes = [
                 name: 'edit-inbox',
                 component: () => import('@main/views/admin/inbox/EditInbox.vue'),
                 meta: { titleKey: 'inbox.edit' }
+              }
+            ]
+          },
+          {
+            path: 'whatsapp/templates',
+            meta: { titleKey: 'admin.whatsappTemplates.title' },
+            children: [
+              {
+                path: '',
+                name: 'whatsapp-templates',
+                component: () => import('@main/views/admin/whatsapp/WhatsAppTemplateList.vue')
+              },
+              {
+                path: 'new',
+                name: 'whatsapp-template-new',
+                component: () => import('@main/views/admin/whatsapp/CreateEditWhatsAppTemplate.vue'),
+                meta: { titleKey: 'globals.messages.newTemplate' }
+              },
+              {
+                path: ':id/edit',
+                name: 'whatsapp-template-edit',
+                component: () => import('@main/views/admin/whatsapp/CreateEditWhatsAppTemplate.vue'),
+                props: true,
+                meta: { titleKey: 'globals.messages.edit' }
               }
             ]
           },
@@ -497,7 +529,7 @@ const routes = [
                 name: 'new-template',
                 props: true,
                 component: () => import('@main/views/admin/templates/CreateEditTemplate.vue'),
-                meta: { titleKey: 'template.new' }
+                meta: { titleKey: 'globals.messages.newTemplate' }
               }
             ]
           },
@@ -662,6 +694,23 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: routes
+})
+
+const preloadErrors = new WeakSet()
+const reloadKey = 'libredesk:preload-reload'
+
+window.addEventListener('vite:preloadError', (event) => {
+  preloadErrors.add(event.payload)
+})
+
+router.onError((error, to) => {
+  if (!preloadErrors.has(error) || sessionStorage.getItem(reloadKey) === to.fullPath) return
+  sessionStorage.setItem(reloadKey, to.fullPath)
+  window.location.assign(to.fullPath)
+})
+
+router.afterEach((to, from, failure) => {
+  if (!failure) sessionStorage.removeItem(reloadKey)
 })
 
 router.beforeEach((to, from, next) => {

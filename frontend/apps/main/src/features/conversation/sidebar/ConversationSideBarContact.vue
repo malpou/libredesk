@@ -1,11 +1,9 @@
 <template>
-  <div class="space-y-2">
+  <div class="min-w-0 space-y-2 text-sm">
     <div class="flex justify-between items-start">
-      <div class="relative">
-        <Avatar class="size-20">
-          <AvatarImage
-            :src="conversation?.contact?.avatar_url || ''"
-          />
+      <div class="relative shrink-0">
+        <Avatar class="size-14">
+          <AvatarImage :src="conversation?.contact?.avatar_url || ''" />
           <AvatarFallback>
             {{ conversation?.contact?.first_name?.toUpperCase().substring(0, 2) }}
           </AvatarFallback>
@@ -14,29 +12,36 @@
           v-if="isLivechat"
           :status="contactStatus"
           size="lg"
-          class="absolute bottom-1 right-1 border-2 border-background"
+          class="absolute -bottom-[3px] -right-[3px]"
         />
       </div>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="h-11 w-11 md:h-7 md:w-7"
-        @click="emitter.emit(EMITTER_EVENTS.CONVERSATION_SIDEBAR_TOGGLE)"
-      >
-        <ViewVerticalIcon />
-      </Button>
+      <div class="flex items-center gap-1">
+        <slot name="actions" />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          class="h-11 w-11 text-muted-foreground hover:text-foreground focus-visible:text-foreground lg:h-7 lg:w-7 [&_svg]:size-3.5"
+          :aria-label="t('globals.terms.collapse')"
+          @click="emitter.emit(EMITTER_EVENTS.CONVERSATION_SIDEBAR_TOGGLE)"
+        >
+          <ViewVerticalIcon aria-hidden="true" />
+        </Button>
+      </div>
     </div>
 
-    <div class="h-6 flex items-center gap-2">
+    <div class="min-h-6 flex items-center gap-2">
       <router-link
         v-if="userStore.can('contacts:read') && conversation?.contact_id"
         :to="{ name: 'contact-detail', params: { id: conversation.contact_id } }"
-        class="flex items-center gap-2 hover:underline cursor-pointer"
+        class="flex min-w-0 items-center gap-2 hover:underline cursor-pointer"
       >
-        {{ conversation?.contact?.first_name + ' ' + conversation?.contact?.last_name }}
+        <span class="min-w-0 font-medium [overflow-wrap:anywhere]">
+          {{ conversation?.contact?.first_name + ' ' + conversation?.contact?.last_name }}
+        </span>
         <ExternalLink size="16" class="text-muted-foreground flex-shrink-0" />
       </router-link>
-      <span v-else>
+      <span v-else class="min-w-0 font-medium [overflow-wrap:anywhere]">
         {{ conversation?.contact?.first_name + ' ' + conversation?.contact?.last_name }}
       </span>
     </div>
@@ -51,23 +56,43 @@
           isVerified ? t('contact.identityVerified') : t('contact.identityNotVerified')
         }}</TooltipContent>
       </Tooltip>
-      <span v-if="conversation?.contact?.email" class="sidebar-value break-all">
-        {{ conversation?.contact?.email }}
-      </span>
+      <template v-if="conversation?.contact?.email">
+        <span class="sidebar-value min-w-0 truncate" :title="conversation.contact.email">
+          {{ conversation.contact.email }}
+        </span>
+        <CopyButton
+          :text="conversation.contact.email"
+          class="h-6 w-6 shrink-0 [&_svg]:h-3.5 [&_svg]:w-3.5"
+        />
+      </template>
       <span v-else class="sidebar-label">
         {{ t('conversation.sidebar.notAvailable') }}
       </span>
     </div>
     <div class="flex gap-2 items-center">
       <Phone size="16" class="text-muted-foreground flex-shrink-0" />
-      <span class="sidebar-value">
+      <span class="sidebar-value min-w-0 [overflow-wrap:anywhere]">
         {{ phoneNumber }}
       </span>
     </div>
     <div class="flex gap-2 items-center" v-if="conversation?.contact?.external_user_id">
       <IdCard size="16" class="text-muted-foreground flex-shrink-0" />
-      <span class="sidebar-value">
+      <span class="sidebar-value min-w-0 [overflow-wrap:anywhere]">
         {{ conversation.contact.external_user_id }}
+      </span>
+    </div>
+    <div
+      v-for="identity in conversation?.contact?.channel_identities"
+      :key="identity.channel + identity.identifier"
+      class="flex gap-2 items-center"
+    >
+      <WhatsAppIcon
+        v-if="identity.channel === 'whatsapp'"
+        class="size-4 text-muted-foreground flex-shrink-0"
+      />
+      <IdCard v-else size="16" class="text-muted-foreground flex-shrink-0" />
+      <span class="sidebar-value break-all">
+        {{ identity.channel === 'whatsapp' ? '+' + identity.identifier : identity.identifier }}
       </span>
     </div>
 
@@ -113,6 +138,7 @@ import { ViewVerticalIcon } from '@radix-icons/vue'
 import { Button } from '@shared-ui/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@shared-ui/components/ui/avatar'
 import StatusDot from '@shared-ui/components/StatusDot.vue'
+import CopyButton from '@/components/button/CopyButton.vue'
 import {
   Mail,
   Phone,
@@ -125,13 +151,14 @@ import {
   ShieldQuestion
 } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@shared-ui/components/ui/tooltip'
+import WhatsAppIcon from '@main/components/icons/WhatsAppIcon.vue'
 import countries from '@shared-ui/constants/countries.js'
 import { useEmitter } from '@/composables/useEmitter'
 import { EMITTER_EVENTS } from '@/constants/emitterEvents.js'
 import { useConversationStore } from '@/stores/conversation'
 import { useUserStore } from '@/stores/user'
 import { useI18n } from 'vue-i18n'
-import api from '../../../api'
+import api from '@/api'
 const conversationStore = useConversationStore()
 const emitter = useEmitter()
 const conversation = computed(() => conversationStore.current)
@@ -143,10 +170,9 @@ const phoneNumber = computed(() => {
   const number = conversation.value?.contact?.phone_number || t('conversation.sidebar.notAvailable')
   if (!countryCodeValue) return number
 
-  // Lookup calling code
   const country = countries.find((c) => c.iso_2 === countryCodeValue)
-  const callingCode = country ? country.calling_code : countryCodeValue
-  return `${callingCode} ${number}`
+  if (!country) return number
+  return `${country.calling_code} ${number}`
 })
 
 const countryName = computed(() => {
@@ -181,7 +207,7 @@ onMounted(async () => {
     const resp = await api.getActiveContextLinks()
     contextLinks.value = resp.data.data || []
   } catch {
-    // Silently ignore — context links are optional.
+    return
   }
 })
 
@@ -193,7 +219,7 @@ const openContextLink = async (app) => {
     const resp = await api.getContextLinkURL(app.id, uuid)
     window.open(resp.data.data, '_blank', 'noopener,noreferrer')
   } catch {
-    // Silently ignore.
+    return
   } finally {
     loadingAppId.value = null
   }

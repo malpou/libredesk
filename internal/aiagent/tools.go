@@ -64,14 +64,15 @@ var (
 
 // runOutcome records which terminal tool action the assistant took during one response run.
 type runOutcome struct {
-	handedOff bool
-	resolved  bool
+	handedOff     bool
+	handoffReason string
+	resolved      bool
 }
 
 type searchKnowledgeTool struct {
-	m *Manager
-	// collect, when set, receives the results each search actually used (preview source attribution).
-	collect func([]aimodels.SearchResult)
+	m                *Manager
+	collect          func([]aimodels.SearchResult)
+	citationsEnabled bool
 }
 
 func (t *searchKnowledgeTool) Name() string { return "search_knowledge_base" }
@@ -114,7 +115,11 @@ func (t *searchKnowledgeTool) Execute(ctx context.Context, args string) (string,
 		if t.collect != nil {
 			used = append(used, r)
 		}
-		fmt.Fprintf(&b, "<<result %d>>\n%s\n<<end result %d>>\n\n", i+1, neutralizeMarkers(r.ChunkText), i+1)
+		fmt.Fprintf(&b, "<<result %d>>\n", i+1)
+		if t.citationsEnabled && r.SourceType == aimodels.SourceHelpArticle {
+			fmt.Fprintf(&b, "article_id: %d\n", r.SourceID)
+		}
+		fmt.Fprintf(&b, "%s\n<<end result %d>>\n\n", neutralizeMarkers(r.ChunkText), i+1)
 	}
 	if t.collect != nil {
 		t.collect(used)
@@ -143,8 +148,8 @@ func (t *handoffTool) Execute(ctx context.Context, args string) (string, error) 
 	}
 	_ = json.Unmarshal([]byte(args), &in)
 	t.m.lo.Debug("ai agent handoff tool called", "conversation_uuid", t.conv.UUID, "reason", in.Reason)
-	t.m.handoff(t.conv, t.assistant, in.Reason)
 	t.outcome.handedOff = true
+	t.outcome.handoffReason = in.Reason
 	return "The conversation has been handed off to a human. Do not take further action.", nil
 }
 

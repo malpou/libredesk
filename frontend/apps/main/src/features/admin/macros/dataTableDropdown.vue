@@ -1,11 +1,6 @@
 <template>
   <DropdownMenu>
-    <DropdownMenuTrigger as-child>
-      <Button variant="ghost" class="w-8 h-8 p-0">
-        <span class="sr-only"></span>
-        <MoreVertical class="w-4 h-4" />
-      </Button>
-    </DropdownMenuTrigger>
+    <DataTableActionTrigger />
     <DropdownMenuContent>
       <DropdownMenuItem @click="editMacro">
         <Pencil class="mr-2 h-4 w-4" />
@@ -41,14 +36,14 @@
 </template>
 
 <script setup>
+import DataTableActionTrigger from '@main/components/datatable/DataTableActionTrigger.vue'
 import { ref } from 'vue'
-import { MoreVertical, Pencil, Trash } from 'lucide-vue-next'
+import { Pencil, Trash } from 'lucide-vue-next'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
+  DropdownMenuSeparator
 } from '@shared-ui/components/ui/dropdown-menu'
 import {
   AlertDialog,
@@ -60,9 +55,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle
 } from '@shared-ui/components/ui/alert-dialog'
-import { Button } from '@shared-ui/components/ui/button'
-import { useEmitter } from '../../../composables/useEmitter'
-import { EMITTER_EVENTS } from '../../../constants/emitterEvents.js'
+import { useEmitter } from '@main/composables/useEmitter'
+import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
 import { useRouter } from 'vue-router'
 import { useMacroStore } from '@main/stores/macro'
 import api from '@main/api/index.js'
@@ -82,7 +76,7 @@ const props = defineProps({
 const handleDelete = async () => {
   await api.deleteMacro(props.macro.id)
 
-  await macroStore.loadMacros(true)
+  macroStore.clearCache()
 
   isDeleteOpen.value = false
   emit.emit(EMITTER_EVENTS.REFRESH_LIST, { model: 'macros' })

@@ -1,13 +1,13 @@
 <template>
-  <Spinner v-if="loading" />
-  <p v-else-if="loadFailed" class="text-sm text-muted-foreground">
+  <LoadingOverlay v-if="loading" :loading="loading" reserve-height />
+  <p v-else-if="loadFailed" class="ui-description">
     {{ t('globals.messages.somethingWentWrong') }}
   </p>
   <div v-else class="flex flex-col">
     <CustomBreadcrumb :links="breadcrumbLinks" class="mb-5" />
 
-    <div class="flex gap-6">
-      <div class="w-[420px] shrink-0 pr-2">
+    <div class="help-center-customizer grid min-w-0 items-start gap-6">
+      <div class="min-w-0">
         <HelpCenterForm
           :help-center="helpCenter"
           :submit-form="handleSave"
@@ -17,10 +17,9 @@
         />
       </div>
 
-      <!-- The preview page pins its footer to the bottom of the frame; an unbounded frame strands it below the content. -->
-      <div class="flex-1 min-w-0">
-        <div class="sticky top-0 space-y-2">
-          <div class="flex items-center gap-2">
+      <div class="help-center-preview min-w-0">
+        <div class="space-y-2">
+          <div class="flex flex-wrap items-center gap-2">
             <Select v-model="previewPage">
               <SelectTrigger class="w-40">
                 <SelectValue />
@@ -30,8 +29,9 @@
                 <SelectItem value="article">{{ t('helpCenter.styling.articlePage') }}</SelectItem>
               </SelectContent>
             </Select>
+            <PreviewThemeToggle v-model="previewTheme" class="ml-auto" />
             <Select v-model="previewDevice">
-              <SelectTrigger class="w-32 ml-auto">
+              <SelectTrigger class="w-32">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -91,11 +91,11 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, provide, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { ExternalLink, Globe, X } from 'lucide-vue-next'
-import { Spinner } from '@shared-ui/components/ui/spinner'
+import LoadingOverlay from '@main/components/layout/LoadingOverlay.vue'
 import {
   Select,
   SelectContent,
@@ -105,6 +105,7 @@ import {
 } from '@shared-ui/components/ui/select'
 import { CustomBreadcrumb } from '@shared-ui/components/ui/breadcrumb'
 import HelpCenterForm from '@main/features/admin/help-center/HelpCenterForm.vue'
+import PreviewThemeToggle from '@/components/PreviewThemeToggle.vue'
 import { useEmitter } from '@/composables/useEmitter.js'
 import { EMITTER_EVENTS } from '@/constants/emitterEvents.js'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
@@ -133,6 +134,8 @@ const origin = computed(() =>
 )
 const previewPage = ref('landing')
 const previewDevice = ref('desktop')
+const previewTheme = ref('light')
+provide('helpCenterPreviewScheme', previewTheme)
 const previewBox = ref(null)
 const previewTitle = computed(() => {
   const values = lastFormValues.value || helpCenter.value || {}
@@ -194,7 +197,12 @@ let previewRequest = 0
 const renderPreview = async (values) => {
   const request = ++previewRequest
   try {
-    const { data } = await api.previewHelpCenter(props.id, values, previewPage.value)
+    const { data } = await api.previewHelpCenter(
+      props.id,
+      values,
+      previewPage.value,
+      previewTheme.value
+    )
     if (request === previewRequest && previewFrame.value) previewFrame.value.srcdoc = data
   } catch {
     // A half-filled form can fail validation while typing; the last good preview stays up.
@@ -207,7 +215,7 @@ const onFormChange = (values) => {
   previewTimer = setTimeout(() => renderPreview(values), 300)
 }
 
-watch(previewPage, () => {
+watch([previewPage, previewTheme], () => {
   if (lastFormValues.value) renderPreview(lastFormValues.value)
 })
 
@@ -261,3 +269,20 @@ onBeforeUnmount(() => {
   boxObserver?.disconnect()
 })
 </script>
+
+<style scoped>
+.help-center-customizer {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 56rem) {
+  .help-center-customizer {
+    grid-template-columns: 26.25rem minmax(0, 1fr);
+  }
+
+  .help-center-preview {
+    position: sticky;
+    top: 0;
+  }
+}
+</style>

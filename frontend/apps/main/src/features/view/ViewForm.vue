@@ -1,6 +1,6 @@
 <template>
   <Dialog :open="openDialog" @update:open="openDialog = false">
-    <DialogContent class="min-w-[40%] min-h-[30%]">
+    <DialogContent class="w-[min(92vw,960px)] max-w-4xl">
       <DialogHeader class="space-y-1">
         <DialogTitle
           >{{ view?.id ? $t('globals.messages.edit') : $t('globals.messages.create') }}
@@ -11,7 +11,7 @@
         </DialogDescription>
       </DialogHeader>
       <form @submit.prevent="onSubmit">
-        <div class="grid gap-4 py-4">
+        <div class="grid gap-5 py-4">
           <FormField v-slot="{ componentField }" name="name" :validate-on-blur="false">
             <FormItem>
               <FormLabel>{{ $t('globals.terms.name') }}</FormLabel>
@@ -20,7 +20,7 @@
                   ref="nameInputRef"
                   id="name"
                   class="col-span-3"
-                  placeholder=""
+
                   v-bind="componentField"
                   @keydown.enter.prevent="onSubmit"
                 />
@@ -35,7 +35,7 @@
               <FormControl>
                 <FilterGroupBuilder :fields="filterFields" v-bind="componentField" />
               </FormControl>
-              <FormDescription> {{ $t('view.form.filters.description') }}</FormDescription>
+              <FormDescription>{{ $t('view.form.filters.description') }}</FormDescription>
               <FormMessage />
             </FormItem>
           </FormField>
@@ -80,10 +80,10 @@ import {
   isPartialLeaf,
   createRoot
 } from '@main/components/filter/filterTree'
-import { useConversationFilters } from '../../composables/useConversationFilters'
+import { useConversationFilters } from '@main/composables/useConversationFilters'
 import { toTypedSchema } from '@vee-validate/zod'
-import { EMITTER_EVENTS } from '../../constants/emitterEvents.js'
-import { useEmitter } from '../../composables/useEmitter'
+import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
+import { useEmitter } from '@main/composables/useEmitter'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { useI18n } from 'vue-i18n'
 import { z } from 'zod'
@@ -115,7 +115,8 @@ const filterFields = computed(() =>
     field,
     type: value.type,
     operators: value.operators,
-    options: value.options ?? []
+    options: value.options ?? [],
+    entity: value.entity
   }))
 )
 const formSchema = toTypedSchema(
@@ -162,18 +163,17 @@ const onSubmit = form.handleSubmit(async (values) => {
   try {
     const payload = { ...values, filters: serializeFilterTree(values.filters) }
 
-    if (payload.id) {
-      await api.updateView(payload.id, payload)
-      emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
-        description: t('globals.messages.savedSuccessfully')
-      })
+    let viewID = payload.id
+    if (viewID) {
+      await api.updateView(viewID, payload)
     } else {
-      await api.createView(payload)
-      emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
-        description: t('globals.messages.savedSuccessfully')
-      })
+      const resp = await api.createView(payload)
+      viewID = resp?.data?.data?.id
     }
-    emitter.emit(EMITTER_EVENTS.REFRESH_LIST, { model: 'view' })
+    emitter.emit(EMITTER_EVENTS.SHOW_TOAST, {
+      description: t('globals.messages.savedSuccessfully')
+    })
+    emitter.emit(EMITTER_EVENTS.REFRESH_LIST, { model: 'view', id: viewID })
     openDialog.value = false
     form.resetForm()
   } catch (error) {

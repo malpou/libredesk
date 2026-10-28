@@ -22,21 +22,22 @@ import (
 	"github.com/zerodha/logf"
 )
 
-var (
-	//go:embed queries.sql
-	efs embed.FS
-	// MaxQueueSize is the maximum size of the task queue.
-	MaxQueueSize = 10000
-)
-
-// TaskType represents the type of conversation task.
-type TaskType string
-
 const (
 	NewConversation    TaskType = "new"
 	UpdateConversation TaskType = "update"
 	TimeTrigger        TaskType = "time-trigger"
+
+	timeTriggerBatchSize           = 1000
+	defaultTimeTriggerLookbackDays = 90
 )
+
+var (
+	//go:embed queries.sql
+	efs          embed.FS
+	MaxQueueSize = 10000
+)
+
+type TaskType string
 
 // ConversationTask represents a unit of work for processing conversations.
 type ConversationTask struct {
@@ -47,32 +48,34 @@ type ConversationTask struct {
 }
 
 type Engine struct {
-	rules             []models.Rule
-	rulesMu           sync.RWMutex
-	q                 queries
-	lo                *logf.Logger
-	i18n              *i18n.I18n
-	conversationStore conversationStore
-	systemUserID      int
-	taskQueue         chan ConversationTask
-	closed            bool
-	closedMu          sync.RWMutex
-	wg                sync.WaitGroup
+	rules                   []models.Rule
+	rulesMu                 sync.RWMutex
+	q                       queries
+	lo                      *logf.Logger
+	i18n                    *i18n.I18n
+	conversationStore       conversationStore
+	systemUserID            int
+	taskQueue               chan ConversationTask
+	closed                  bool
+	closedMu                sync.RWMutex
+	wg                      sync.WaitGroup
+	timeTriggerLookbackDays int
 
 	suppressed   map[string]int
 	suppressedMu sync.Mutex
 }
 
 type Opts struct {
-	DB   *sqlx.DB
-	Lo   *logf.Logger
-	I18n *i18n.I18n
+	DB                      *sqlx.DB
+	Lo                      *logf.Logger
+	I18n                    *i18n.I18n
+	TimeTriggerLookbackDays int
 }
 
 type conversationStore interface {
 	ApplyAction(action models.RuleAction, conversation cmodels.Conversation, user umodels.User) error
 	GetConversation(teamID int, uuid, refNum string) (cmodels.Conversation, error)
-	GetConversationsCreatedAfter(time.Time) ([]cmodels.Conversation, error)
+	GetConversationsCreatedAfter(after time.Time, afterID, limit int) ([]cmodels.ConversationRef, error)
 }
 
 type queries struct {
@@ -92,9 +95,10 @@ func New(opt Opts) (*Engine, error) {
 	var (
 		q queries
 		e = &Engine{
-			lo:        opt.Lo,
-			i18n:      opt.I18n,
-			taskQueue: make(chan ConversationTask, MaxQueueSize),
+			lo:                      opt.Lo,
+			i18n:                    opt.I18n,
+			taskQueue:               make(chan ConversationTask, MaxQueueSize),
+			timeTriggerLookbackDays: opt.TimeTriggerLookbackDays,
 		}
 	)
 	if err := dbutil.ScanSQLFile("queries.sql", &q, opt.DB, efs); err != nil {
@@ -298,7 +302,7 @@ func (e *Engine) EvaluateNewConversationRules(conversation cmodels.Conversation)
 	}:
 	default:
 		// Queue is full.
-		e.lo.Warn("EvaluateNewConversationRules: newConversationQ is full, unable to enqueue conversation")
+		e.lo.Error("EvaluateNewConversationRules: newConversationQ is full, unable to enqueue conversation", "conversation_uuid", conversation.UUID)
 	}
 }
 
@@ -326,7 +330,7 @@ func (e *Engine) EvaluateConversationUpdateRules(conversation cmodels.Conversati
 		previousValues: previousValues,
 	}:
 	default:
-		e.lo.Warn("EvaluateConversationUpdateRules: updateConversationQ is full, unable to enqueue conversation")
+		e.lo.Error("EvaluateConversationUpdateRules: updateConversationQ is full, unable to enqueue conversation", "conversation_uuid", conversation.UUID, "event_type", eventType)
 	}
 }
 
@@ -345,7 +349,7 @@ func (e *Engine) handleNewConversation(conversation cmodels.Conversation) {
 	e.lo.Debug("handling new conversation for automation rule evaluation", "uuid", conversation.UUID)
 	rules := e.filterRulesByType(models.RuleTypeNewConversation, "")
 	if len(rules) == 0 {
-		e.lo.Info("no rules to evaluate for new conversation rule evaluation", "uuid", conversation.UUID)
+		e.lo.Debug("no rules to evaluate for new conversation rule evaluation", "uuid", conversation.UUID)
 		return
 	}
 	e.evalConversationRules(rules, conversation, nil)
@@ -356,7 +360,7 @@ func (e *Engine) handleUpdateConversation(conversation cmodels.Conversation, eve
 	e.lo.Debug("handling update conversation for automation rule evaluation", "uuid", conversation.UUID, "event_type", eventType)
 	rules := e.filterRulesByType(models.RuleTypeConversationUpdate, eventType)
 	if len(rules) == 0 {
-		e.lo.Info("no rules to evaluate for conversation update", "uuid", conversation.UUID, "event_type", eventType)
+		e.lo.Debug("no rules to evaluate for conversation update", "uuid", conversation.UUID, "event_type", eventType)
 		return
 	}
 	e.evalConversationRules(rules, conversation, previousValues)
@@ -364,28 +368,48 @@ func (e *Engine) handleUpdateConversation(conversation cmodels.Conversation, eve
 
 // handleTimeTrigger handles time trigger events.
 func (e *Engine) handleTimeTrigger() {
-	e.lo.Info("running time trigger evaluation for automation rules")
-	thirtyDaysAgo := time.Now().Add(-30 * 24 * time.Hour)
-	conversations, err := e.conversationStore.GetConversationsCreatedAfter(thirtyDaysAgo)
-	if err != nil {
-		e.lo.Error("error fetching conversations for time trigger", "error", err)
-		return
-	}
 	rules := e.filterRulesByType(models.RuleTypeTimeTrigger, "")
 	if len(rules) == 0 {
-		e.lo.Info("no rules to evaluate for time trigger")
+		e.lo.Debug("no rules to evaluate for time trigger")
 		return
 	}
-	e.lo.Info("fetched conversations for evaluating time triggers", "conversations_count", len(conversations), "rules_count", len(rules))
-	for _, c := range conversations {
-		// Fetch entire conversation.
-		conversation, err := e.conversationStore.GetConversation(0, c.UUID, "")
-		if err != nil {
-			e.lo.Error("error fetching conversation for time trigger", "uuid", c.UUID, "error", err)
-			continue
-		}
-		e.evalConversationRules(rules, conversation, nil)
+	lookbackDays := e.timeTriggerLookbackDays
+	if lookbackDays <= 0 {
+		lookbackDays = defaultTimeTriggerLookbackDays
 	}
+	var (
+		createdAfter = time.Now().Add(-time.Duration(lookbackDays) * 24 * time.Hour)
+		afterID      = 0
+		total        = 0
+		batch        = 0
+	)
+	e.lo.Info("starting conversation evaluation for time triggers", "rules_count", len(rules), "lookback_days", lookbackDays)
+	for {
+		refs, err := e.conversationStore.GetConversationsCreatedAfter(createdAfter, afterID, timeTriggerBatchSize)
+		if err != nil {
+			e.lo.Error("error fetching conversations for time trigger", "after_id", afterID, "batch", batch, "error", err)
+			return
+		}
+		batch++
+		e.lo.Debug("fetched conversation batch for time trigger", "batch", batch, "after_id", afterID, "count", len(refs))
+		if len(refs) == 0 {
+			break
+		}
+		for _, ref := range refs {
+			conversation, err := e.conversationStore.GetConversation(0, ref.UUID, "")
+			if err != nil {
+				e.lo.Error("error fetching conversation for time trigger", "uuid", ref.UUID, "error", err)
+				continue
+			}
+			e.evalConversationRules(rules, conversation, nil)
+		}
+		afterID = refs[len(refs)-1].ID
+		total += len(refs)
+		if len(refs) < timeTriggerBatchSize {
+			break
+		}
+	}
+	e.lo.Info("evaluated conversations for time triggers", "conversations_count", total, "batches", batch, "rules_count", len(rules))
 }
 
 // suppress marks a conversation as having automation actions in flight.
@@ -435,6 +459,7 @@ func (e *Engine) queryRules() []models.Rule {
 		}
 		// Set values from DB.
 		for i := range rulesBatch {
+			rulesBatch[i].ID = rule.ID
 			rulesBatch[i].Type = rule.Type
 			rulesBatch[i].Events = rule.Events
 			rulesBatch[i].ExecutionMode = rule.ExecutionMode

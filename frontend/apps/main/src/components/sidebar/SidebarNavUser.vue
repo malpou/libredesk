@@ -1,21 +1,18 @@
 <template>
   <DropdownMenu>
     <DropdownMenuTrigger as-child>
-      <SidebarMenuButton
-        size="default"
-        class="p-0 !overflow-visible"
-      >
-        <div class="relative">
-          <Avatar class="h-8 w-8 rounded-md">
-            <AvatarImage :src="userStore.avatar" alt="U" class="rounded-md" />
-            <AvatarFallback class="rounded-md">
+      <SidebarMenuButton size="default" class="p-0">
+        <div class="relative flex shrink-0">
+          <Avatar class="h-8 w-8">
+            <AvatarImage :src="userStore.avatar" alt="U" />
+            <AvatarFallback>
               {{ userStore.getInitials }}
             </AvatarFallback>
           </Avatar>
           <StatusDot
             :status="userStore.user.availability_status"
             size="sm"
-            class="absolute bottom-0 right-0 border border-background"
+            class="absolute bottom-0 right-0"
           />
         </div>
         <div class="grid flex-1 text-left text-sm leading-tight">
@@ -35,9 +32,9 @@
       <DropdownMenuLabel class="font-normal space-y-2 px-2">
         <!-- User header -->
         <div class="flex items-center gap-2 py-1.5 text-left text-sm">
-          <Avatar class="h-8 w-8 rounded-md">
+          <Avatar class="h-8 w-8">
             <AvatarImage :src="userStore.avatar" alt="U" />
-            <AvatarFallback class="rounded-md">
+            <AvatarFallback>
               {{ userStore.getInitials }}
             </AvatarFallback>
           </Avatar>
@@ -95,7 +92,7 @@
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
-        <DropdownMenuItem @click="showShortcuts = true">
+        <DropdownMenuItem @click="shortcutsDialog.show">
           <Keyboard size="18" class="mr-2" />
           {{ t('navigation.keyboardShortcuts') }}
         </DropdownMenuItem>
@@ -107,8 +104,6 @@
       </DropdownMenuItem>
     </DropdownMenuContent>
   </DropdownMenu>
-
-  <KeyboardShortcutsDialog v-model:open="showShortcuts" />
 </template>
 
 <script setup>
@@ -130,19 +125,16 @@ import { ChevronsUpDown, CircleUserRound, Keyboard, LogOut } from 'lucide-vue-ne
 import { useUserStore } from '@main/stores/user'
 import { useIsMobile } from '@shared-ui/composables'
 import { useRouter } from 'vue-router'
-import KeyboardShortcutsDialog from '@main/components/KeyboardShortcutsDialog.vue'
+import { useKeyboardShortcutsDialog } from '@main/composables/useKeyboardShortcutsDialog'
+import { useLogout } from '@main/composables/useLogout'
 
 import { useColorMode } from '@vueuse/core'
-import { ref } from 'vue'
 
 const isMobile = useIsMobile()
 const mode = useColorMode()
 const userStore = useUserStore()
 const router = useRouter()
 const { t } = useI18n()
-const showShortcuts = ref(false)
-
-const logout = () => {
-  window.location.href = '/logout'
-}
+const shortcutsDialog = useKeyboardShortcutsDialog()
+const logout = useLogout()
 </script>

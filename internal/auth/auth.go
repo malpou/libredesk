@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
+const defaultSessionLifetime = 9 * time.Hour
+
 // ErrOIDCInvalidClient reports the provider rejecting the client credentials, typically an expired or wrong client secret.
 var ErrOIDCInvalidClient = errors.New("oidc provider rejected client credentials")
 
@@ -43,7 +46,7 @@ type Provider struct {
 	ID           int
 	Provider     string
 	ProviderURL  string
-	RedirectURL  string
+	RedirectURL  func() (string, error)
 	ClientID     string
 	ClientSecret string
 }
@@ -55,25 +58,25 @@ type Config struct {
 	SessionLifetime time.Duration
 }
 
-// defaultSessionLifetime is used when Config.SessionLifetime is unset or non-positive.
-const defaultSessionLifetime = 9 * time.Hour
-
 // Auth is the auth service it manages OIDC authentication and sessions
 type Auth struct {
-	mu         sync.RWMutex
-	cfg        Config
-	i18n       *i18n.I18n
-	oauthCfgs  map[int]oauth2.Config
-	verifiers  map[int]*oidc.IDTokenVerifier
-	sess       *simplesessions.Manager
-	logger     *logf.Logger
-	oidcClient *http.Client
+	mu           sync.RWMutex
+	cfg          Config
+	i18n         *i18n.I18n
+	oauthCfgs    map[int]oauth2.Config
+	verifiers    map[int]*oidc.IDTokenVerifier
+	redirectURLs map[int]func() (string, error)
+	sess         *simplesessions.Manager
+	logger       *logf.Logger
+	sessions     *kvstore.SessionStore
+	oidcClient   *http.Client
 }
 
 // New creates an Auth service with configured OIDC providers.
 func New(cfg Config, i18n *i18n.I18n, sessions *kvstore.Store, logger *logf.Logger, dialControl ssrf.Control) (*Auth, error) {
 	oauthCfgs := make(map[int]oauth2.Config)
 	verifiers := make(map[int]*oidc.IDTokenVerifier)
+	redirectURLs := make(map[int]func() (string, error))
 
 	oidcClient := newOIDCClient(dialControl)
 
@@ -88,7 +91,6 @@ func New(cfg Config, i18n *i18n.I18n, sessions *kvstore.Store, logger *logf.Logg
 			ClientID:     provider.ClientID,
 			ClientSecret: provider.ClientSecret,
 			Endpoint:     oidcProv.Endpoint(),
-			RedirectURL:  provider.RedirectURL,
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		}
 
@@ -96,15 +98,17 @@ func New(cfg Config, i18n *i18n.I18n, sessions *kvstore.Store, logger *logf.Logg
 
 		oauthCfgs[provider.ID] = oauthCfg
 		verifiers[provider.ID] = verifier
+		redirectURLs[provider.ID] = provider.RedirectURL
 	}
 
 	lifetime := cfg.SessionLifetime
 	if lifetime <= 0 {
 		lifetime = defaultSessionLifetime
 	}
+	cfg.SessionLifetime = lifetime
 
 	sess := simplesessions.New(simplesessions.Options{
-		EnableAutoCreate: true,
+		EnableAutoCreate: false,
 		SessionIDLength:  64,
 		Cookie: simplesessions.CookieOptions{
 			Name:       "libredesk_session",
@@ -116,29 +120,21 @@ func New(cfg Config, i18n *i18n.I18n, sessions *kvstore.Store, logger *logf.Logg
 	})
 
 	// Sessions end a fixed lifetime after login; activity does not extend them.
-	sess.UseStore(kvstore.NewSessionStore(sessions, lifetime))
+	sessStore := kvstore.NewSessionStore(sessions, lifetime)
+	sess.UseStore(sessStore)
 	sess.SetCookieHooks(simpleSessGetCookieCB, simpleSessSetCookieCB)
 
 	return &Auth{
-		cfg:        cfg,
-		i18n:       i18n,
-		oauthCfgs:  oauthCfgs,
-		verifiers:  verifiers,
-		sess:       sess,
-		logger:     logger,
-		oidcClient: oidcClient,
+		cfg:          cfg,
+		i18n:         i18n,
+		oauthCfgs:    oauthCfgs,
+		verifiers:    verifiers,
+		redirectURLs: redirectURLs,
+		sess:         sess,
+		logger:       logger,
+		sessions:     sessStore,
+		oidcClient:   oidcClient,
 	}, nil
-}
-
-// newOIDCClient builds the HTTP client used for OIDC discovery.
-func newOIDCClient(dialControl ssrf.Control) *http.Client {
-	transport := ssrf.NewTransport(dialControl, 3*time.Second)
-	transport.TLSHandshakeTimeout = 5 * time.Second
-	transport.ResponseHeaderTimeout = 5 * time.Second
-	return &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: transport,
-	}
 }
 
 // TestProvider tests the OIDC provider url by doing a discovery on it.
@@ -158,6 +154,7 @@ func (a *Auth) Reload(cfg Config) error {
 
 	oauthCfgs := make(map[int]oauth2.Config)
 	verifiers := make(map[int]*oidc.IDTokenVerifier)
+	redirectURLs := make(map[int]func() (string, error))
 
 	for _, provider := range cfg.Providers {
 		oidcProv, err := oidc.NewProvider(oidc.ClientContext(context.Background(), a.oidcClient), provider.ProviderURL)
@@ -170,7 +167,6 @@ func (a *Auth) Reload(cfg Config) error {
 			ClientID:     provider.ClientID,
 			ClientSecret: provider.ClientSecret,
 			Endpoint:     oidcProv.Endpoint(),
-			RedirectURL:  provider.RedirectURL,
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		}
 
@@ -178,13 +174,23 @@ func (a *Auth) Reload(cfg Config) error {
 
 		oauthCfgs[provider.ID] = oauthCfg
 		verifiers[provider.ID] = verifier
+		redirectURLs[provider.ID] = provider.RedirectURL
 	}
 
-	a.cfg = cfg
+	a.cfg.Providers = cfg.Providers
 	a.oauthCfgs = oauthCfgs
 	a.verifiers = verifiers
+	a.redirectURLs = redirectURLs
 
 	return nil
+}
+
+func (a *Auth) RemoveProvider(id int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.oauthCfgs, id)
+	delete(a.verifiers, id)
+	delete(a.redirectURLs, id)
 }
 
 // LoginURL returns the login URL for the given provider.
@@ -195,10 +201,14 @@ func (a *Auth) LoginURL(providerID int, state string) (string, error) {
 	if !ok {
 		return "", envelope.NewError(envelope.InputError, a.i18n.T("validation.notFoundProvider"), nil)
 	}
+	redirectURL, err := a.resolveRedirectURL(providerID)
+	if err != nil {
+		a.logger.Error("error resolving oidc redirect url", "provider_id", providerID, "error", err)
+		return "", envelope.NewError(envelope.GeneralError, a.i18n.T("globals.messages.somethingWentWrong"), nil)
+	}
+	oauthCfg.RedirectURL = redirectURL
 	return oauthCfg.AuthCodeURL(state), nil
 }
-
-// ExchangeOIDCToken takes an OIDC authorization code, validates it, and returns an OIDC token for subsequent auth.
 func (a *Auth) ExchangeOIDCToken(ctx context.Context, providerID int, code string) (string, OIDCclaim, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -208,6 +218,12 @@ func (a *Auth) ExchangeOIDCToken(ctx context.Context, providerID int, code strin
 		a.logger.Error("oidc provider not configured, it may have failed to initialize at startup", "provider_id", providerID)
 		return "", OIDCclaim{}, fmt.Errorf("invalid provider ID: %d", providerID)
 	}
+	redirectURL, err := a.resolveRedirectURL(providerID)
+	if err != nil {
+		a.logger.Error("error resolving oidc redirect url", "provider_id", providerID, "error", err)
+		return "", OIDCclaim{}, err
+	}
+	oauthCfg.RedirectURL = redirectURL
 
 	verifier, ok := a.verifiers[providerID]
 	if !ok {
@@ -247,6 +263,10 @@ func (a *Auth) ExchangeOIDCToken(ctx context.Context, providerID int, code strin
 		a.logger.Error("error parsing claims from oidc id_token", "provider_id", providerID, "error", err)
 		return "", OIDCclaim{}, errors.New("error getting user from OIDC")
 	}
+	if strings.TrimSpace(claims.Email) == "" {
+		a.logger.Error("oidc id_token has no email, check that the provider sends the email claim", "provider_id", providerID)
+		return "", OIDCclaim{}, errors.New("oidc id_token has no email")
+	}
 	a.logger.Debug("oidc token exchange successful", "provider_id", providerID, "email", claims.Email, "email_verified", claims.EmailVerified)
 	return rawIDTk, claims, nil
 }
@@ -258,30 +278,42 @@ func (a *Auth) SaveSession(user amodels.User, r *fastglue.Request) error {
 
 	sess, err := a.sess.NewSession(r, r)
 	if err != nil {
-		a.logger.Error("error creating login session", "error", err)
+		a.logger.Error("error creating login session", "user_id", user.ID, "error", err)
 		return err
 	}
 
-	if err := sess.SetMulti(map[string]interface{}{
+	if err := a.sessions.IndexUserSession(r.RequestCtx, user.ID, sess.ID()); err != nil {
+		a.logger.Error("error indexing login session", "user_id", user.ID, "error", err)
+		return err
+	}
+
+	if err := sess.SetMulti(map[string]any{
 		"id":         user.ID,
+		"indexed":    true,
 		"email":      user.Email,
 		"first_name": user.FirstName,
 		"last_name":  user.LastName,
 	}); err != nil {
-		a.logger.Error("error setting login session", "error", err)
+		a.logger.Error("error setting login session", "user_id", user.ID, "error", err)
 		return err
 	}
 	return nil
 }
 
-// SetSessionValues sets passed values in the session.
-func (a *Auth) SetSessionValues(r *fastglue.Request, values map[string]interface{}) error {
+// SetSessionValues preserves an existing session and creates one only when the browser has no valid session.
+func (a *Auth) SetSessionValues(r *fastglue.Request, values map[string]any) error {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	sess, err := a.sess.Acquire(r.RequestCtx, r, r)
+	if err == nil {
+		_, err = sess.GetMulti("id")
+	}
+	if errors.Is(err, simplesessions.ErrInvalidSession) {
+		sess, err = a.sess.NewSession(r, r)
+	}
 	if err != nil {
-		a.logger.Error("error acquiring session", "error", err)
+		a.logger.Error("error creating session", "error", err)
 		return err
 	}
 
@@ -347,7 +379,7 @@ func (a *Auth) ValidateSession(r *fastglue.Request) (models.User, error) {
 		return models.User{}, err
 	}
 
-	sessVals, err := sess.GetMulti("id", "email", "first_name", "last_name")
+	sessVals, err := sess.GetMulti("id", "email", "first_name", "last_name", "indexed")
 	if err != nil {
 		a.logger.Error("error fetching session variables", "error", err)
 		return models.User{}, err
@@ -359,6 +391,13 @@ func (a *Auth) ValidateSession(r *fastglue.Request) (models.User, error) {
 		firstName, _ = sess.String(sessVals["first_name"], nil)
 		lastName, _  = sess.String(sessVals["last_name"], nil)
 	)
+
+	if userID > 0 {
+		indexed, err := sess.Bool(sessVals["indexed"], nil /** err **/)
+		if err != nil || !indexed {
+			return models.User{}, simplesessions.ErrInvalidSession
+		}
+	}
 
 	return models.User{
 		ID:        userID,
@@ -374,15 +413,64 @@ func (a *Auth) DestroySession(r *fastglue.Request) error {
 	defer a.mu.RUnlock()
 
 	sess, err := a.sess.Acquire(r.RequestCtx, r, r)
+	if err == simplesessions.ErrInvalidSession {
+		return nil
+	}
 	if err != nil {
 		a.logger.Error("error acquiring session", "error", err)
+		return err
+	}
+	userID, err := sess.Int(sess.Get("id"))
+	if err != nil && !errors.Is(err, simplesessions.ErrNil) && !errors.Is(err, simplesessions.ErrInvalidSession) {
 		return err
 	}
 	if err := sess.Destroy(); err != nil {
 		a.logger.Error("error clearing session", "error", err)
 		return err
 	}
+	if userID > 0 {
+		if err := a.sessions.UnindexUserSession(r.RequestCtx, userID, sess.ID()); err != nil {
+			a.logger.Error("error removing session index entry", "user_id", userID, "error", err)
+			return err
+		}
+	}
 	return nil
+}
+
+func (a *Auth) DestroyUserSessions(ctx context.Context, userID int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if err := a.sessions.DestroyUserSessions(ctx, userID); err != nil {
+		a.logger.Error("error destroying user sessions", "user_id", userID, "error", err)
+		return envelope.NewError(envelope.GeneralError, a.i18n.T("globals.messages.somethingWentWrong"), nil)
+	}
+	return nil
+}
+
+// resolveRedirectURL reads the provider's redirect URL from the current root URL setting.
+func (a *Auth) resolveRedirectURL(providerID int) (string, error) {
+	fn, ok := a.redirectURLs[providerID]
+	if !ok || fn == nil {
+		return "", fmt.Errorf("no redirect URL resolver for provider: %d", providerID)
+	}
+	return fn()
+}
+
+// DestroyUserSessions ends every session of the user, for callers without an Auth (the CLI).
+func DestroyUserSessions(ctx context.Context, sessions *kvstore.Store, userID int) error {
+	// The TTL only matters for writes; destroying never writes.
+	return kvstore.NewSessionStore(sessions, 0).DestroyUserSessions(ctx, userID)
+}
+
+func newOIDCClient(dialControl ssrf.Control) *http.Client {
+	transport := ssrf.NewTransport(dialControl, 3*time.Second)
+	transport.TLSHandshakeTimeout = 5 * time.Second
+	transport.ResponseHeaderTimeout = 5 * time.Second
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
 }
 
 // generateCSRFToken creates a random base64 encoded str.
@@ -409,9 +497,7 @@ func getRequestCookie(name string, r *fastglue.Request) (*fasthttp.Cookie, error
 	return c, nil
 }
 
-// simpleSessGetCookieCB is the simplessesions callback for retrieving the session cookie
-// from a fastglue request.
-func simpleSessGetCookieCB(name string, r interface{}) (*http.Cookie, error) {
+func simpleSessGetCookieCB(name string, r any) (*http.Cookie, error) {
 	req, ok := r.(*fastglue.Request)
 	if !ok {
 		return nil, errors.New("session callback doesn't have fastglue.Request")
@@ -442,9 +528,7 @@ func simpleSessGetCookieCB(name string, r interface{}) (*http.Cookie, error) {
 	}, nil
 }
 
-// simpleSessSetCookieCB is the simplessesions callback for setting the session cookie
-// to a fastglue request.
-func simpleSessSetCookieCB(c *http.Cookie, w interface{}) error {
+func simpleSessSetCookieCB(c *http.Cookie, w any) error {
 	req, ok := w.(*fastglue.Request)
 	if !ok {
 		return errors.New("session callback doesn't have fastglue.Request")

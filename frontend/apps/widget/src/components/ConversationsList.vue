@@ -1,41 +1,50 @@
 <template>
   <div>
     <div v-if="chatStore.isLoadingConversations" class="py-8">
-      <Spinner size="md" :text="$t('globals.terms.loading')" />
+      <Spinner size="md" :absolute="false" :text="$t('globals.terms.loading')" />
     </div>
 
-    <div v-else-if="!chatStore.hasConversations" class="flex flex-col items-center justify-center py-12 px-4">
+    <div
+      v-else-if="!chatStore.hasConversations"
+      class="flex flex-col items-center justify-center py-12 px-4"
+    >
       <MessageCircleDashed class="w-10 h-10 text-muted-foreground mb-4" />
       <h4 class="text-sm text-muted-foreground mb-2">{{ $t('globals.messages.noMessagesYet') }}</h4>
     </div>
 
     <div v-else>
-      <div
+      <Button
         v-for="conversation in chatStore.getConversations"
         :key="conversation.uuid"
-        class="p-4 border-b border-border hover:bg-accent/50 cursor-pointer transition-colors"
+        type="button"
+        variant="ghost"
+        class="h-auto w-full justify-start whitespace-normal rounded-none p-4 border-b border-border text-left font-normal"
         @click="openConversation(conversation.uuid)"
       >
-        <div class="flex items-center gap-3">
+        <div class="flex w-full min-w-0 items-center gap-3">
           <Avatar class="size-10 flex-shrink-0">
             <AvatarImage :src="getAvatarUrl(conversation)" />
             <AvatarFallback>{{ getAvatarFallback(conversation) }}</AvatarFallback>
           </Avatar>
           <div class="flex-1 min-w-0">
             <div class="flex items-center justify-between mb-0.5">
-              <span class="text-sm font-medium text-foreground">{{ getSenderLabel(conversation.last_message.author) }}</span>
-              <span class="text-xs text-muted-foreground flex-shrink-0 ml-2">{{ getRelativeTime(new Date(conversation.last_message.created_at)) }}</span>
+              <span class="min-w-0 truncate text-sm font-medium text-foreground">{{
+                getSenderLabel(conversation.last_message.author)
+              }}</span>
+              <span class="text-xs text-muted-foreground flex-shrink-0 ml-2">{{
+                getRelativeTime(new Date(conversation.last_message.created_at))
+              }}</span>
             </div>
             <div class="flex items-center gap-2">
               <p class="text-sm text-muted-foreground truncate flex-1 min-w-0">
-                {{ conversation.last_message.content }}
+                {{ lastMessagePreview(conversation.last_message, t) }}
               </p>
               <UnreadCountBadge :count="conversation.unread_message_count" class="flex-shrink-0" />
             </div>
           </div>
           <ChevronRight class="w-4 h-4 text-muted-foreground flex-shrink-0" />
         </div>
-      </div>
+      </Button>
     </div>
   </div>
 </template>
@@ -48,8 +57,10 @@ import { useChatStore } from '@widget/store/chat.js'
 import { useWidgetStore } from '@widget/store/widget.js'
 import { getRelativeTime } from '@shared-ui/utils/datetime.js'
 import { Avatar, AvatarFallback, AvatarImage } from '@shared-ui/components/ui/avatar'
+import { Button } from '@shared-ui/components/ui/button'
 import { Spinner } from '@shared-ui/components/ui/spinner'
 import UnreadCountBadge from './UnreadCountBadge.vue'
+import { lastMessagePreview } from '@widget/utils/messagePreview.js'
 
 const chatStore = useChatStore()
 const widgetStore = useWidgetStore()
@@ -78,7 +89,7 @@ function getAvatarUrl(conversation) {
     if (assignee?.id > 0) {
       return assignee.avatar_url || ''
     }
-    return widgetStore.config.launcher?.logo_url || ''
+    return widgetStore.branding?.launcher?.logo_url || ''
   }
   return author?.avatar_url || ''
 }

@@ -21,7 +21,7 @@
             />
 
             <div class="flex gap-2 justify-start items-center">
-              <h2 class="text-xl font-semibold text-foreground">
+              <h2 class="ui-display-heading">
                 {{ contact.first_name }} {{ contact.last_name }}
               </h2>
               <Badge v-if="contact.type" variant="secondary">
@@ -80,6 +80,19 @@
             >
               <IdCardIcon size="14" class="flex-shrink-0" />
               {{ contact.external_user_id }}
+            </div>
+
+            <div
+              v-for="identity in contact.channel_identities"
+              :key="identity.channel + identity.identifier"
+              class="flex items-center gap-1.5 text-xs text-muted-foreground"
+            >
+              <WhatsAppIcon
+                v-if="identity.channel === 'whatsapp'"
+                class="size-3.5 flex-shrink-0"
+              />
+              <IdCardIcon v-else size="14" class="flex-shrink-0" />
+              {{ identity.channel === 'whatsapp' ? '+' + identity.identifier : identity.identifier }}
             </div>
 
             <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -142,7 +155,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { format } from 'date-fns'
 import { useI18n } from 'vue-i18n'
@@ -169,6 +182,7 @@ import {
   DropdownMenuSeparator
 } from '@shared-ui/components/ui/dropdown-menu'
 import { useUserStore } from '@/stores/user'
+import { useContactStore } from '@/stores/contact'
 import {
   ShieldOffIcon,
   ShieldCheckIcon,
@@ -182,9 +196,10 @@ import ContactDetail from '@/layouts/contact/ContactDetail.vue'
 import api from '@/api'
 import ContactForm from '@/features/contact/ContactForm.vue'
 import ContactNotes from '@/features/contact/ContactNotes.vue'
+import WhatsAppIcon from '@/components/icons/WhatsAppIcon.vue'
 import { createFormSchema } from '@/features/contact/formSchema.js'
 import { useEmitter } from '@/composables/useEmitter'
-import { EMITTER_EVENTS } from '@/constants/emitterEvents'
+import { EMITTER_EVENTS, CONTACT_ACTIONS } from '@/constants/emitterEvents'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { downloadBlobResponse, parseBlobError } from '@shared-ui/utils/file'
 import { CustomBreadcrumb } from '@shared-ui/components/ui/breadcrumb'
@@ -199,6 +214,7 @@ const contact = ref(null)
 const showBlockConfirmation = ref(false)
 const showDeleteConfirmation = ref(false)
 const userStore = useUserStore()
+const contactStore = useContactStore()
 
 const form = useForm({
   validationSchema: toTypedSchema(createFormSchema(t))
@@ -216,13 +232,29 @@ const breadcrumbLinks = [
   { path: '', label: t('contact.editContact') }
 ]
 
-onMounted(fetchContact)
+const paletteActions = {
+  [CONTACT_ACTIONS.TOGGLE_BLOCK]: () => (showBlockConfirmation.value = true),
+  [CONTACT_ACTIONS.EXPORT]: () => exportContact(),
+  [CONTACT_ACTIONS.DELETE]: () => (showDeleteConfirmation.value = true)
+}
+const onPaletteAction = (action) => paletteActions[action]?.()
+
+onMounted(() => {
+  emitter.on(EMITTER_EVENTS.CONTACT_ACTION, onPaletteAction)
+  fetchContact()
+})
+
+onUnmounted(() => {
+  emitter.off(EMITTER_EVENTS.CONTACT_ACTION, onPaletteAction)
+  contactStore.clearCurrent()
+})
 
 async function fetchContact() {
   formLoading.value = true
   try {
     const { data } = await api.getContact(route.params.id)
     contact.value = data.data
+    contactStore.setCurrent(data.data)
     form.setValues(data.data, false)
   } catch (err) {
     showError(err)

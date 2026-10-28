@@ -14,7 +14,9 @@
 FROM node:22-alpine AS frontend
 WORKDIR /src
 RUN corepack enable
-COPY frontend/package.json frontend/pnpm-lock.yaml ./frontend/
+# pnpm-workspace.yaml carries pnpm's allowBuilds list (esbuild, cypress, ...); without it a
+# frozen install fails with ERR_PNPM_IGNORED_BUILDS.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./frontend/
 WORKDIR /src/frontend
 RUN pnpm install --frozen-lockfile
 # The whole repo, not just frontend/. ArticleEditor.vue imports
@@ -28,7 +30,7 @@ ARG LIBREDESK_VERSION=v0.0.0
 ENV VITE_APP_VERSION=${LIBREDESK_VERSION}
 RUN pnpm build:main && pnpm build:widget
 
-FROM golang:1.26.10-alpine AS backend
+FROM golang:1.27.3-alpine AS backend
 RUN apk --no-cache add git make
 WORKDIR /src
 COPY go.mod go.sum ./

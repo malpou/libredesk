@@ -1,20 +1,27 @@
 <template>
-  <div class="min-h-screen flex flex-col">
+  <div class="min-h-full flex flex-col">
     <!-- Main Content Area -->
     <div class="flex flex-wrap gap-4 pb-4">
-      <div class="flex items-center gap-4 mb-4">
+      <div class="flex flex-wrap items-center gap-3 mb-4 w-full">
         <!-- Search Input -->
-        <Input
-          type="text"
+        <SearchInput
+          class="min-w-0 flex-1 max-w-sm"
           v-model="searchTerm"
           :placeholder="$t('contact.searchByEmail')"
-          @input="fetchContactsDebounced"
+          :clear-label="$t('globals.messages.clearSearch')"
+          @update:model-value="fetchContactsDebounced"
         />
 
         <!-- Order By Popover -->
         <Popover>
-          <PopoverTrigger>
-            <Button variant="outline" size="sm" class="flex items-center h-8">
+          <PopoverTrigger as-child>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              class="size-9"
+              :aria-label="$t('globals.messages.sortBy')"
+            >
               <ArrowDownWideNarrow size="18" class="text-muted-foreground cursor-pointer" />
             </Button>
           </PopoverTrigger>
@@ -25,7 +32,9 @@
                 <SelectValue :placeholder="orderByField" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem :value="'users.created_at'">{{ $t('globals.terms.createdAt') }}</SelectItem>
+                <SelectItem :value="'users.created_at'">{{
+                  $t('globals.terms.createdAt')
+                }}</SelectItem>
                 <SelectItem :value="'users.email'">{{ $t('globals.terms.email') }}</SelectItem>
               </SelectContent>
             </Select>
@@ -42,6 +51,16 @@
             </Select>
           </PopoverContent>
         </Popover>
+
+        <Button
+          v-if="userStore.can('contacts:write')"
+          type="button"
+          size="sm"
+          class="flex items-center h-8 ml-auto"
+          @click="showCreateDialog = true"
+        >
+          {{ $t('contact.new') }}
+        </Button>
       </div>
 
       <!-- Loading State -->
@@ -59,55 +78,63 @@
 
       <!-- Loaded State -->
       <template v-else>
-        <Card
+        <router-link
           v-for="contact in contacts"
           :key="contact.id"
-          class="p-4 w-full hover:bg-accent/50 cursor-pointer"
-          @click="$router.push({ name: 'contact-detail', params: { id: contact.id } })"
+          :to="{ name: 'contact-detail', params: { id: contact.id } }"
+          class="block w-full rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <div class="flex items-center gap-4">
-            <Avatar class="h-10 w-10 border">
-              <AvatarImage :src="contact.avatar_url || ''" />
-              <AvatarFallback class="text-sm font-medium">
-                {{ getInitials(contact.first_name, contact.last_name) }}
-              </AvatarFallback>
-            </Avatar>
+          <Card class="p-4 w-full transition-colors duration-150 hover:bg-accent/50">
+            <div class="flex items-center gap-4">
+              <Avatar class="h-10 w-10 border">
+                <AvatarImage :src="contact.avatar_url || ''" />
+                <AvatarFallback class="text-sm font-medium">
+                  {{ getInitials(contact.first_name, contact.last_name) }}
+                </AvatarFallback>
+              </Avatar>
 
-            <div class="space-y-1 overflow-hidden flex-1">
-              <div class="flex items-center gap-2">
-                <h4 class="text-sm font-semibold truncate">
-                  {{ contact.first_name }} {{ contact.last_name }}
-                </h4>
-                <Badge v-if="contact.type" variant="secondary" class="text-xs px-1.5 py-0">
-                  {{ contact.type === 'visitor' ? $t('contact.type.visitor') : $t('contact.type.contact') }}
-                </Badge>
-              </div>
-              <p class="text-xs text-muted-foreground truncate">
-                {{ contact.email }}
-              </p>
-              <div v-if="contact.external_user_id" class="flex items-center gap-1 text-xs text-muted-foreground">
-                <IdCardIcon size="12" class="flex-shrink-0" />
-                <span class="truncate">{{ contact.external_user_id }}</span>
+              <div class="space-y-1 overflow-hidden flex-1">
+                <div class="flex items-center gap-2">
+                  <h4 class="ui-subheading truncate">
+                    {{ contact.first_name }} {{ contact.last_name }}
+                  </h4>
+                  <Badge v-if="contact.type" variant="secondary" class="text-xs px-1.5 py-0">
+                    {{
+                      contact.type === 'visitor'
+                        ? $t('contact.type.visitor')
+                        : $t('contact.type.contact')
+                    }}
+                  </Badge>
+                </div>
+                <p class="text-xs text-muted-foreground truncate">
+                  {{ contact.email }}
+                </p>
+                <div
+                  v-if="contact.external_user_id"
+                  class="flex items-center gap-1 text-xs text-muted-foreground"
+                >
+                  <IdCardIcon size="12" class="flex-shrink-0" />
+                  <span class="truncate">{{ contact.external_user_id }}</span>
+                </div>
               </div>
             </div>
-          </div>
-        </Card>
+          </Card>
+        </router-link>
         <div v-if="contacts.length === 0" class="flex items-center justify-center w-full h-32">
           <p class="text-lg text-muted-foreground">{{ $t('contact.noContactsFound') }}</p>
         </div>
       </template>
     </div>
 
-    <PaginationBar
-      v-model:page="page"
-      v-model:per-page="perPage"
-      :total-pages="totalPages"
-    />
+    <PaginationBar v-model:page="page" v-model:per-page="perPage" :total-pages="totalPages" />
   </div>
+
+  <CreateContactDialog v-model:open="showCreateDialog" @created="onContactCreated" />
 </template>
 
 <script setup>
 import { ref, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Card } from '@shared-ui/components/ui/card'
 import { Skeleton } from '@shared-ui/components/ui/skeleton'
 import { Avatar, AvatarImage, AvatarFallback } from '@shared-ui/components/ui/avatar'
@@ -119,7 +146,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@shared-ui/components/ui/select'
-import { Input } from '@shared-ui/components/ui/input'
+import SearchInput from '@shared-ui/components/SearchInput.vue'
 import { Button } from '@shared-ui/components/ui/button'
 import { ArrowDownWideNarrow, IdCardIcon } from 'lucide-vue-next'
 import { Popover, PopoverContent, PopoverTrigger } from '@shared-ui/components/ui/popover'
@@ -128,6 +155,8 @@ import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
 import { useEmitter } from '@main/composables/useEmitter'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
 import PaginationBar from '@main/components/pagination/PaginationBar.vue'
+import CreateContactDialog from './CreateContactDialog.vue'
+import { useUserStore } from '@main/stores/user'
 import api from '@main/api'
 
 const contacts = ref([])
@@ -139,7 +168,10 @@ const searchTerm = ref('')
 const orderByField = ref('users.created_at')
 const orderByDirection = ref('desc')
 const total = ref(0)
+const showCreateDialog = ref(false)
 const emitter = useEmitter()
+const router = useRouter()
+const userStore = useUserStore()
 let fetchRequestId = 0
 
 const fetchContactsDebounced = useDebounceFn(() => {
@@ -189,6 +221,10 @@ const fetchContacts = async () => {
 
 const getInitials = (firstName, lastName) => {
   return `${firstName?.[0] || ''}${lastName?.[0] || ''}`.toUpperCase()
+}
+
+const onContactCreated = (contact) => {
+  router.push({ name: 'contact-detail', params: { id: contact.id } })
 }
 
 watch([page, perPage], fetchContacts)

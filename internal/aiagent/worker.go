@@ -3,10 +3,11 @@ package aiagent
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
-
 	"time"
 
 	"github.com/abhinavxd/libredesk/internal/ai"
@@ -16,7 +17,8 @@ import (
 	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
 	statusmodels "github.com/abhinavxd/libredesk/internal/conversation/status/models"
 	imageutil "github.com/abhinavxd/libredesk/internal/image"
-
+	"github.com/abhinavxd/libredesk/internal/inbox"
+	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 )
@@ -30,7 +32,9 @@ const (
 
 	// confirmMarker is the line the model emits before its trailing confirmation question so it
 	// can be split off and sent as a separate message.
-	confirmMarker = "[[confirm]]"
+	confirmMarker     = "[[confirm]]"
+	suggestionsMarker = "[[suggestions]]"
+	sourcesMarker     = "[[sources]]"
 
 	// typingRefreshInterval must stay under the widget's 5s typing expiry (TYPING_RECEIVE_TIMEOUT).
 	typingRefreshInterval = 3 * time.Second
@@ -102,7 +106,7 @@ func (m *Manager) worker(ctx context.Context) {
 func (m *Manager) handleWithRecover(ctx context.Context, convID int) {
 	defer func() {
 		if r := recover(); r != nil {
-			m.lo.Error("recovered from panic in ai agent worker", "conversation_id", convID, "panic", r)
+			m.lo.Error("recovered from panic in ai agent worker", "conversation_id", convID, "panic", r, "stack", string(debug.Stack()))
 		}
 	}()
 	m.handle(ctx, convID)
@@ -159,7 +163,7 @@ func (m *Manager) enqueue(convID int) {
 func (m *Manager) handoffByConvID(convID int, reason string) {
 	defer func() {
 		if r := recover(); r != nil {
-			m.lo.Error("recovered from panic handing off dropped ai job", "conversation_id", convID, "panic", r)
+			m.lo.Error("recovered from panic handing off dropped ai job", "conversation_id", convID, "panic", r, "stack", string(debug.Stack()))
 		}
 	}()
 	conv, err := m.convo.GetConversation(convID, "", "")
@@ -229,14 +233,16 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	if inbound == nil {
 		return
 	}
-	// Only respond to a fresh inbound customer message, never to the assistant's own or automated
-	// replies. A requeued run sees the previous run's just-posted reply as the last message, so it
-	// instead checks for an inbound message the previous run's history never included.
 	m.mu.Lock()
 	prevSeen, hasPrev := m.lastSeen[convID]
 	m.lastSeen[convID] = msgs[len(msgs)-1].ID
 	m.mu.Unlock()
-	if !lastIsInboundContact(msgs) && (!hasPrev || inbound.ID <= prevSeen) {
+	// Providers reject a history that ends with the reply, so put it above messages sent while it was written.
+	if hasPrev {
+		msgs = previousReplyFirst(msgs, prevSeen)
+	}
+	// A human or automated reply after the customer's message leaves nothing to answer.
+	if !lastIsInboundContact(msgs) {
 		return
 	}
 	// The reply and any identity-scoped tools act as the primary contact. An email thread can carry
@@ -273,22 +279,17 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	}
 	m.lo.Debug("ai agent running", "conversation_uuid", conv.UUID, "history_messages", len(history), "turns", turns)
 
-	// A JWT livechat contact is trusted by login; everyone else (email channel, anonymous visitor)
-	// is trusted only within an OTP verification window. Read live so mid-turn verification counts.
-	verified := func() bool {
-		if conv.InboxChannel != channelEmail && conv.Contact.Type == umodels.UserTypeContact {
-			return true
-		}
-		return m.isConversationVerified(conv.UUID, conv.Contact.Email.String)
-	}
+	// Read live so mid-turn verification counts.
+	verified := func() bool { return m.isContactVerified(conv) }
 	// Snapshot for the run-start registration decisions (one KV read); tctx still gets the live
 	// closure so mid-turn verification is picked up per tool call.
 	runVerified := verified()
 	m.lo.Debug("ai agent verification state", "conversation_uuid", conv.UUID, "channel", conv.InboxChannel, "contact_type", conv.Contact.Type, "has_email", conv.Contact.Email.String != "", "verified", runVerified)
 
 	outcome := &runOutcome{}
+	var hits []aimodels.SearchResult
 	tools := []ai.Tool{
-		&searchKnowledgeTool{m: m},
+		&searchKnowledgeTool{m: m, citationsEnabled: assistant.CitationsEnabled, collect: func(rs []aimodels.SearchResult) { hits = append(hits, rs...) }},
 		&resolveTool{m: m, conv: conv, outcome: outcome},
 	}
 	if assistant.HandoffEnabled {
@@ -345,34 +346,48 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	}
 	if err != nil {
 		m.lo.Error("error running ai agent", "conversation_uuid", conv.UUID, "error", err)
-		if !outcome.handedOff {
-			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
+		reason := m.i18n.T("ai.agent.handoffError")
+		if outcome.handedOff {
+			reason = outcome.handoffReason
 		}
-		return
-	}
-	// The assistant escalated; the handoff tool already reassigned and noted it.
-	if outcome.handedOff {
-		m.lo.Debug("ai agent handed off", "conversation_uuid", conv.UUID)
+		m.handoff(conv, assistant, reason)
 		return
 	}
 	// The model's text answer is the reply to the customer. Handoff and resolve are separate tool actions.
+	answer, articleIDs := splitArticleSources(answer, hits, assistant.CitationsEnabled)
 	answer, confirm := splitConfirmation(strings.TrimSpace(answer))
+	answer, answerSuggestions := splitSuggestions(answer)
+	confirm, confirmSuggestions := splitSuggestions(confirm)
 	// Email gets one message; separate chat-style bubbles only suit the widget.
 	if conv.InboxChannel == channelEmail && confirm != "" {
 		answer, confirm = answer+"\n\n"+confirm, ""
+		answerSuggestions, confirmSuggestions = nil, nil
 	}
 	if answer != "" {
 		m.lo.Debug("ai agent replying", "conversation_uuid", conv.UUID, "reply_len", len(answer), "resolved", outcome.resolved)
-		if err := m.postReply(conv, assistant, answer, nil); err != nil {
+		if err := m.postReply(conv, assistant, answer, replyMeta(answerSuggestions, articleIDs)); err != nil {
 			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
 			return
 		}
 	}
 	if confirm != "" {
-		if err := m.postReply(conv, assistant, confirm, map[string]any{"is_confirmation": true}); err != nil {
+		if len(confirmSuggestions) == 0 {
+			confirmSuggestions = []string{m.i18n.T("globals.messages.yes"), m.i18n.T("ai.agent.needMoreHelp")}
+		}
+		meta := suggestedRepliesMeta(confirmSuggestions)
+		meta["is_confirmation"] = true
+		if err := m.postReply(conv, assistant, confirm, meta); err != nil {
 			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
 			return
 		}
+	}
+	if outcome.handedOff {
+		m.lo.Debug("ai agent handed off", "conversation_uuid", conv.UUID)
+		if m.requestHandoffForm(conv, assistant) {
+			return
+		}
+		m.handoff(conv, assistant, outcome.handoffReason)
+		return
 	}
 	if outcome.resolved && (answer != "" || turns > 0) {
 		m.resolve(conv, assistant)
@@ -424,11 +439,66 @@ func (m *Manager) postReply(conv cmodels.Conversation, assistant models.Assistan
 		meta = map[string]any{}
 	}
 	meta["ai_assistant_id"] = assistant.ID
-	if _, err := m.convo.QueueReply(nil, conv.InboxID, assistant.UserID, conv.ContactID, conv.UUID, stringutil.Markdown2HTML(text), to, nil, nil, meta); err != nil {
+	articleIDs, _ := meta["ai_article_ids"].([]int)
+	content := articleCitationHTML(text, articleIDs)
+	if _, err := m.convo.QueueReply(nil, conv.InboxID, assistant.UserID, conv.ContactID, conv.UUID, content, to, nil, nil, "" /** sendFrom **/, meta); err != nil {
 		m.lo.Error("error sending assistant reply", "conversation_uuid", conv.UUID, "error", err)
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) CompleteHandoff(conv cmodels.Conversation) error {
+	if !conv.AssignedUserID.Valid {
+		return fmt.Errorf("conversation has no assigned assistant")
+	}
+	assistant, err := m.GetAssistantByUserID(int(conv.AssignedUserID.Int))
+	if err != nil {
+		return err
+	}
+	private := false
+	messages, _, err := m.convo.GetConversationMessages(conv.UUID, 1, 1, &private, []string{cmodels.MessageOutgoing})
+	if err != nil {
+		return err
+	}
+	if len(messages) == 0 || !messageMetaBool(messages[0].Meta, "handoff_form_pending") {
+		return fmt.Errorf("conversation has no pending handoff form")
+	}
+	// A refresh re-shows the form from the saved flag, and two submits racing must hand off only once.
+	cleared, err := m.convo.ClearHandoffFormPending(messages[0].UUID)
+	if err != nil {
+		return err
+	}
+	if !cleared {
+		return fmt.Errorf("conversation has no pending handoff form")
+	}
+	m.handoff(conv, assistant, "")
+	return nil
+}
+
+func (m *Manager) requestHandoffForm(conv cmodels.Conversation, assistant models.Assistant) bool {
+	if conv.InboxChannel != inbox.ChannelLiveChat {
+		return false
+	}
+	inboxRecord, err := m.inbox.GetDBRecord(conv.InboxID)
+	if err != nil {
+		m.lo.Error("error loading inbox for AI handoff form", "inbox_id", conv.InboxID, "error", err)
+		return false
+	}
+	var config livechat.Config
+	if err := json.Unmarshal(inboxRecord.Config, &config); err != nil {
+		m.lo.Error("error parsing inbox config for AI handoff form", "inbox_id", conv.InboxID, "error", err)
+		return false
+	}
+	isVisitor := conv.Contact.Type == umodels.UserTypeVisitor
+	config = config.ResolvePreChatForm(isVisitor)
+	if !config.PreChatForm.Enabled || !config.PreChatForm.HandoffOnly || !slices.ContainsFunc(config.PreChatForm.Fields, func(field livechat.PreChatFormField) bool { return field.Enabled }) {
+		return false
+	}
+	if err := m.postReply(conv, assistant, m.i18n.T("ai.agent.handoffFormPrompt"), map[string]any{"handoff_form_pending": true}); err != nil {
+		return false
+	}
+	return true
 }
 
 // handoff notes the reason and moves the conversation to the fallback team, or unassigns if none is set.
@@ -481,7 +551,7 @@ func (m *Manager) PreviewReply(ctx context.Context, assistantID int, message str
 	}
 	history := []aimodels.ChatMessage{{Role: aimodels.RoleUser, Content: message}}
 	var hits []aimodels.SearchResult
-	tools := []ai.Tool{&searchKnowledgeTool{m: m, collect: func(rs []aimodels.SearchResult) { hits = append(hits, rs...) }}}
+	tools := []ai.Tool{&searchKnowledgeTool{m: m, citationsEnabled: a.CitationsEnabled, collect: func(rs []aimodels.SearchResult) { hits = append(hits, rs...) }}}
 	runCtx, cancel := context.WithTimeout(ctx, livechatRunTimeout)
 	defer cancel()
 	// Preview is search-only: no custom tools (empty allowed set), no built-in, no side effects.
@@ -489,11 +559,32 @@ func (m *Manager) PreviewReply(ctx context.Context, assistantID int, message str
 	if err != nil {
 		return "", nil, err
 	}
+	answer, articleIDs := splitArticleSources(answer, hits, a.CitationsEnabled)
 	main, confirm := splitConfirmation(strings.TrimSpace(answer))
 	if confirm != "" {
 		main += "\n\n" + confirm
 	}
-	return main, m.previewSources(hits), nil
+	sources := m.previewSources(hits)
+	references, err := m.convo.GetArticleReferences(articleIDs)
+	if err != nil {
+		m.lo.Error("error loading preview article references", "error", err)
+	}
+	urlByID := make(map[int]string, len(references))
+	for _, reference := range references {
+		urlByID[reference.ID] = reference.URL
+	}
+	for i := range sources {
+		if sources[i].Type == aimodels.SourceHelpArticle {
+			sources[i].URL = urlByID[sources[i].ID]
+		}
+	}
+	var resolvedIDs []int
+	for _, id := range articleIDs {
+		if urlByID[id] != "" {
+			resolvedIDs = append(resolvedIDs, id)
+		}
+	}
+	return numberedCitationText(main, resolvedIDs), sources, nil
 }
 
 // previewSources dedupes search hits by source, keeping each one's best score. Snippets and help
@@ -626,7 +717,10 @@ func (m *Manager) buildHistory(msgs []cmodels.Message, contactID int) []aimodels
 		}
 
 		if text == "" && len(images) == 0 && len(markers) == 0 {
-			continue
+			if role != aimodels.RoleUser {
+				continue
+			}
+			text = "[The customer sent a message with no readable text.]"
 		}
 		if len(markers) > 0 {
 			if text != "" {
@@ -735,4 +829,67 @@ func splitConfirmation(answer string) (string, string) {
 		return confirm, ""
 	}
 	return main, confirm
+}
+
+func splitSuggestions(answer string) (string, []string) {
+	idx := strings.LastIndex(answer, suggestionsMarker)
+	if idx == -1 {
+		return answer, nil
+	}
+	body := strings.TrimSpace(strings.ReplaceAll(answer[:idx], suggestionsMarker, ""))
+	var raw []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(answer[idx+len(suggestionsMarker):])), &raw); err != nil {
+		return body, nil
+	}
+	suggestions := make([]string, 0, min(len(raw), 3))
+	for _, suggestion := range raw {
+		suggestion = strings.TrimSpace(suggestion)
+		if suggestion == "" || len([]rune(suggestion)) > 80 || slices.Contains(suggestions, suggestion) {
+			continue
+		}
+		suggestions = append(suggestions, suggestion)
+		if len(suggestions) == 3 {
+			break
+		}
+	}
+	return body, suggestions
+}
+
+func suggestedRepliesMeta(suggestions []string) map[string]any {
+	meta := map[string]any{}
+	if len(suggestions) > 0 {
+		meta["suggested_replies"] = suggestions
+	}
+	return meta
+}
+
+func messageMetaBool(raw json.RawMessage, key string) bool {
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return false
+	}
+	value, _ := meta[key].(bool)
+	return value
+}
+
+// previousReplyFirst moves AI replies posted after prevSeen above the other messages that arrived since.
+func previousReplyFirst(msgs []cmodels.Message, prevSeen int) []cmodels.Message {
+	out := make([]cmodels.Message, 0, len(msgs))
+	var later []cmodels.Message
+	for _, msg := range msgs {
+		if msg.ID > prevSeen && !isAIReply(msg) {
+			later = append(later, msg)
+			continue
+		}
+		out = append(out, msg)
+	}
+	return append(out, later...)
+}
+
+// isAIReply matches replies from any assistant, so a reassignment mid-run still finds the old reply.
+func isAIReply(msg cmodels.Message) bool {
+	var meta struct {
+		AssistantID int `json:"ai_assistant_id"`
+	}
+	return json.Unmarshal(msg.Meta, &meta) == nil && meta.AssistantID > 0
 }

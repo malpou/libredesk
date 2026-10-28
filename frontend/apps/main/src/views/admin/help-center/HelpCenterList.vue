@@ -2,17 +2,33 @@
   <AdminSplitLayout>
     <template #content>
       <LoadingOverlay :loading="loading" reserve-height>
-        <div class="flex justify-end mb-4">
-          <Button @click="openCreateModal">
-            {{ $t('globals.messages.new') }}
-          </Button>
-        </div>
+        <AdminToolbar v-model:search="searchTerm" searchable class="mb-5">
+          <template #actions>
+            <Button @click="openCreateModal">
+              {{ $t('globals.messages.new') }}
+            </Button>
+          </template>
+        </AdminToolbar>
 
-        <DataTable :columns="columns" :data="helpCenters" :loading="loading" />
+        <DataTable
+          v-model:search="searchTerm"
+          :searchable="false"
+          :columns="columns"
+          :data="helpCenters"
+          :loading="loading"
+        />
       </LoadingOverlay>
     </template>
     <template #help>
       <p>{{ $t('admin.helpCenter.help') }}</p>
+      <a
+        href="https://docs.libredesk.io/configuration/help-center"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="link-style"
+      >
+        {{ $t('globals.terms.learnMore') }}
+      </a>
     </template>
   </AdminSplitLayout>
 
@@ -32,6 +48,8 @@
 </template>
 
 <script setup>
+import AdminToolbar from '@main/layouts/admin/AdminToolbar.vue'
+
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useEmitter } from '@/composables/useEmitter.js'
@@ -47,6 +65,7 @@ import api from '@/api'
 import { handleHTTPError } from '@shared-ui/utils/http.js'
 import { useI18n } from 'vue-i18n'
 
+const searchTerm = ref('')
 const router = useRouter()
 const emitter = useEmitter()
 const { t } = useI18n()
