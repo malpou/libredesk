@@ -54,6 +54,18 @@ func authenticateUser(r *fastglue.Request, app *App) (models.User, error) {
 		}
 	}
 
+	// metsa: guard's identity, when present, signs the agent in (guard_identity.go).
+	if guardUser, present, err := guardAgent(r, app); present {
+		if gerr, ok := err.(guardError); ok {
+			return user, gerr.toEnvelope()
+		}
+		if err != nil {
+			return user, err
+		}
+		r.RequestCtx.SetUserValue("auth_method", authMethodGuard)
+		return guardUser, nil
+	}
+
 	// Validate session and fetch user.
 	sessUser, err := app.auth.ValidateSession(r)
 	if err != nil || sessUser.ID <= 0 {
@@ -117,6 +129,9 @@ func auth(handler fastglue.FastRequestHandler) fastglue.FastRequestHandler {
 		user, err := authenticateUser(r, app)
 		if err != nil {
 			if envErr, ok := err.(envelope.Error); ok {
+				if envErr.Code == http.StatusServiceUnavailable { // metsa: guard's keys unreachable
+					return sendErrorEnvelope(r, err)
+				}
 				if envErr.ErrorType == envelope.PermissionError {
 					return r.SendErrorEnvelope(http.StatusForbidden, envErr.Message, nil, envelope.PermissionError)
 				}
@@ -147,6 +162,9 @@ func perm(handler fastglue.FastRequestHandler, perm string) fastglue.FastRequest
 		user, err := authenticateUser(r, app)
 		if err != nil {
 			if envErr, ok := err.(envelope.Error); ok {
+				if envErr.Code == http.StatusServiceUnavailable { // metsa: guard's keys unreachable
+					return sendErrorEnvelope(r, err)
+				}
 				if envErr.ErrorType == envelope.PermissionError {
 					return r.SendErrorEnvelope(http.StatusForbidden, envErr.Message, nil, envelope.PermissionError)
 				}
@@ -188,6 +206,9 @@ func authPage(handler fastglue.FastRequestHandler) fastglue.FastRequestHandler {
 		app := r.Context.(*App)
 
 		user, err := validatePageSession(r, app)
+		if handled, resp := guardPageFailure(r, err, string(r.RequestCtx.RequestURI()), nil); handled { // metsa
+			return resp
+		}
 		if err != nil {
 			return r.SendErrorEnvelope(http.StatusUnauthorized, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
 		}
@@ -213,6 +234,9 @@ func notAuthPage(handler fastglue.FastRequestHandler) fastglue.FastRequestHandle
 		app := r.Context.(*App)
 
 		user, err := validatePageSession(r, app)
+		if handled, resp := guardPageFailure(r, err, string(r.RequestCtx.QueryArgs().Peek("next")), handler); handled { // metsa
+			return resp
+		}
 		if err != nil {
 			return r.SendErrorEnvelope(http.StatusUnauthorized, app.i18n.T("auth.invalidOrExpiredSessionClearCookie"), nil, envelope.GeneralError)
 		}
@@ -299,6 +323,10 @@ func authOrSignedURL(handler fastglue.FastRequestHandler) fastglue.FastRequestHa
 
 // validatePageSession returns the session user and clears a revoked or expired session.
 func validatePageSession(r *fastglue.Request, app *App) (models.User, error) {
+	// metsa: guard's identity, when present, decides; a refusal is a guardError.
+	if user, present, err := guardAgent(r, app); present {
+		return user, err
+	}
 	user, err := app.auth.ValidateSession(r)
 	if err == nil && user.ID > 0 {
 		agent, lookupErr := app.user.GetAgentCachedOrLoad(user.ID)
