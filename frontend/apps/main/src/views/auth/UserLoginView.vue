@@ -14,7 +14,22 @@
           <p class="text-sm text-muted-foreground">{{ t('auth.signIn') }}</p>
         </div>
 
-        <div v-if="enabledOIDCProviders.length" class="space-y-3">
+        <div v-if="guardIdentity" class="space-y-3">
+          <Button type="button" class="w-full" @click="redirectToGuard">
+            {{ t('auth.signInButton') }}
+          </Button>
+          <Button
+            v-if="guardSignInRefused"
+            variant="outline"
+            type="button"
+            class="w-full"
+            @click="signOutOfGuard"
+          >
+            {{ t('navigation.logout') }}
+          </Button>
+        </div>
+
+        <div v-else-if="enabledOIDCProviders.length" class="space-y-3">
           <Button
             v-for="oidcProvider in enabledOIDCProviders"
             :key="oidcProvider.id"
@@ -136,6 +151,7 @@ import { EMITTER_EVENTS } from '@main/constants/emitterEvents.js'
 import { useAppSettingsStore } from '@main/stores/appSettings'
 import AuthLayout from '@/layouts/auth/AuthLayout.vue'
 import { Eye, EyeOff } from 'lucide-vue-next'
+import { GUARD_LOGOUT_PATH, guardIdentityEnabled, guardLoginURL } from '@main/utils/guard-auth.js'
 
 const emitter = useEmitter()
 const { t } = useI18n()
@@ -180,9 +196,22 @@ onMounted(async () => {
   showOIDCError()
 })
 
+// metsa: guard signs agents in; a refused sign-in can switch account by signing out of guard.
+const guardIdentity = computed(() => guardIdentityEnabled(appSettingsStore.public_config))
+const guardSignInRefused = ref(false)
+
+const redirectToGuard = () => {
+  window.location.href = guardLoginURL(router.currentRoute.value.query.next)
+}
+
+const signOutOfGuard = () => {
+  window.location.href = GUARD_LOGOUT_PATH
+}
+
 const showOIDCError = () => {
   const { error, ...query } = router.currentRoute.value.query
   if (!error) return
+  guardSignInRefused.value = true
   errorMessage.value = t(
     Object.hasOwn(oidcErrorKeys, error) ? oidcErrorKeys[error] : 'auth.oidcLoginFailed'
   )

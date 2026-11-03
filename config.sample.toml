@@ -40,6 +40,12 @@ keepalive_timeout = "10s"
 # libredesk automatically keeps local login available when no OIDC provider is enabled to prevent lockout.
 # If an enabled provider is unavailable or misconfigured, set auth.local_login_enabled = true to restore password login.
 local_login_enabled = true
+# Sign agents in from the identity a trusted edge proxy (metsa's guard) verifies and signs, sent as the
+# x-bastion-identity header (a short-lived ES256 JWT). The agent is matched by email as with OIDC: no
+# account is created, a disabled one is refused, and the agent's Libredesk role stays its permissions.
+# API keys and password login keep working. Needs PLATFORM_KIT_EDGEAUTH_AUDIENCES (the hosts served,
+# comma separated) and optionally PLATFORM_KIT_EDGEAUTH_JWKS_URL. Can also be set with LIBREDESK_AUTH__GUARD_IDENTITY.
+guard_identity = false
 
 # Optional client credentials for one OIDC provider, read from here instead of the database.
 # Can also be set with LIBREDESK_OIDC__CLIENT_ID and LIBREDESK_OIDC__CLIENT_SECRET.

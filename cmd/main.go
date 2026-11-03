@@ -103,6 +103,7 @@ type App struct {
 	fs                 stuffbin.FileSystem
 	consts             atomic.Value
 	auth               *auth_.Auth
+	guard              *guardIdentity // metsa: nil unless auth.guard_identity
 	sessionsMu         sync.RWMutex
 	authz              *authz.Enforcer
 	i18n               *i18n.I18n
@@ -322,6 +323,7 @@ func main() {
 		oidc:             oidc,
 		i18n:             i18n,
 		auth:             auth,
+		guard:            initGuardIdentity(),
 		media:            media,
 		setting:          settings,
 		inbox:            inbox,

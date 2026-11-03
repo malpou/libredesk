@@ -14,6 +14,17 @@ describe('createLogout', () => {
     expect(browser.location.href).toBe('/')
   })
 
+  it('ends the guard session when signing in goes through guard', async () => {
+    const pushNotifications = { disable: vi.fn().mockResolvedValue() }
+    const apiClient = { logout: vi.fn().mockResolvedValue() }
+    const browser = { location: { href: '' } }
+
+    await createLogout(pushNotifications, browser, apiClient, '/.well-known/bastion/logout')()
+
+    expect(apiClient.logout).toHaveBeenCalled()
+    expect(browser.location.href).toBe('/.well-known/bastion/logout')
+  })
+
   it('logs out when clearing the push association fails', async () => {
     const pushNotifications = { disable: vi.fn().mockRejectedValue(new Error('offline')) }
     const apiClient = { logout: vi.fn().mockResolvedValue() }

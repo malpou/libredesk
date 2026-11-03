@@ -62,6 +62,8 @@ func handleGetConfig(r *fastglue.Request) error {
 	// Add SSO providers to the response
 	publicSettings["app.sso_providers"] = enabledProviders
 	publicSettings["auth.local_login_enabled"] = isLocalLoginEnabled(oidcProviders)
+	// metsa: the login page signs in and out through guard instead.
+	publicSettings["auth.guard_identity"] = app.guard != nil
 
 	return r.SendEnvelope(publicSettings)
 }
