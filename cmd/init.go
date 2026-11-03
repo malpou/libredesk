@@ -1037,10 +1037,7 @@ type kvStores struct {
 // initKV connects to NATS and binds every KV bucket. Buckets are provisioned outside libredesk
 // (with their replication and max age), so a missing bucket stops startup instead of being created.
 func initKV() *kvStores {
-	opts := []nats.Option{
-		nats.Name("libredesk"),
-		nats.MaxReconnects(-1),
-	}
+	opts := natsOptions()
 	if f := ko.String("nats.creds_file"); f != "" {
 		opts = append(opts, nats.UserCredentials(f))
 	} else if u := ko.String("nats.user"); u != "" {
@@ -1078,6 +1075,26 @@ func initKV() *kvStores {
 		otpPending:     open("otp_pending", "libredesk_otp_pending", 10*time.Minute),
 		otpState:       open("otp_state", "libredesk_otp_state", 30*time.Minute),
 		rateLimit:      open("ratelimit", "libredesk_ratelimit", 2*time.Minute),
+	}
+}
+
+// natsOptions keeps the connection alive for the life of the process. Sessions live in NATS, so a
+// closed connection fails every login while the HTTP port still answers its probes.
+//
+// IgnoreAuthErrorAbort is needed because the server drops the connection every hour when its one
+// hour credential expires. By default nats.go gives up for good if the same auth error arrives
+// twice in a row. Other server errors can still close the connection, so the closed handler exits
+// and Kubernetes restarts the pod. LastError is nil on the Close at shutdown.
+func natsOptions() []nats.Option {
+	return []nats.Option{
+		nats.Name("libredesk"),
+		nats.MaxReconnects(-1),
+		nats.IgnoreAuthErrorAbort(),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			if err := nc.LastError(); err != nil {
+				log.Fatalf("nats connection closed: %v", err)
+			}
+		}),
 	}
 }
 
