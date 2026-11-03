@@ -67,6 +67,7 @@ type chatCompletionResponse struct {
 			Content   string            `json:"content"`
 			ToolCalls []models.ToolCall `json:"tool_calls"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage json.RawMessage `json:"usage"`
 }
@@ -163,6 +164,9 @@ func (o *OpenAIClient) SendChatCompletion(ctx context.Context, payload models.Ch
 	}
 	if len(parsed.Choices) == 0 {
 		return models.ChatCompletionResult{}, fmt.Errorf("no response found")
+	}
+	if parsed.Choices[0].FinishReason == "length" {
+		return models.ChatCompletionResult{}, ErrResponseTruncated
 	}
 
 	var usage models.TokenUsage

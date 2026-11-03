@@ -621,6 +621,7 @@
   "ai.noAnswerWithinSteps": "The AI hit its step limit before answering. Try a simpler request, or ask an admin to raise the limit.",
   "ai.noTagsConfigured": "No tags exist yet. Tag suggestions need an existing tag list to choose from. Ask an admin to create tags first.",
   "ai.providerTimeout": "The AI provider took too long to respond. Try again, or with a shorter request.",
+  "ai.responseTruncated": "The AI reply reached the Max tokens limit and was not used. Raise Max tokens in the AI settings, or try with a shorter text.",
   "ai.providerUnavailable": "The AI provider could not be reached. Try again in a few minutes, or ask your administrator to check the AI settings.",
   "ai.rateLimited": "The AI provider is rate limiting requests. Wait a minute and try again.",
   "ai.summarizeEmptyConversation": "There are no messages to summarize yet.",

@@ -46,11 +46,8 @@ func (m *Manager) newAgentRun(systemPrompt string, history []models.ChatMessage,
 		return nil, err
 	}
 	client := NewOpenAIClient(cfg, m.lo, m.providerHTTPClient)
-	if instructions := strings.TrimSpace(cfg.Instructions); appendWorkspaceInstructions && instructions != "" {
-		if systemPrompt != "" {
-			systemPrompt += "\n\n"
-		}
-		systemPrompt += "Workspace admin instructions (follow these, they take precedence on tone and format):\n" + instructions
+	if appendWorkspaceInstructions {
+		systemPrompt = appendInstructions(systemPrompt, cfg.Instructions)
 	}
 
 	registry, defs, err := m.buildToolRegistry(tctx, allowedToolIDs, includeBuiltinSearch, extra)

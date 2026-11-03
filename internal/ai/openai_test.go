@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -146,5 +147,24 @@ func TestToolCallExtraContentRoundTrip(t *testing.T) {
 	}
 	if string(got) != extra {
 		t.Fatalf("replayed tool call extra_content = %s, want %s", got, extra)
+	}
+}
+
+// A reply cut off at max_tokens must not reach the caller as if it were complete.
+func TestChatCompletionRejectsTruncatedReply(t *testing.T) {
+	finish := "length"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"<p>cut off <a href=\"https://exa"},"finish_reason":"` + finish + `"}]}`))
+	}))
+	defer srv.Close()
+
+	lo := logf.New(logf.Opts{})
+	c := NewOpenAIClient(models.ProviderConfig{BaseURL: srv.URL, APIKey: "k", Model: "m"}, &lo, srv.Client())
+	if _, err := c.SendPrompt(context.Background(), models.PromptPayload{SystemPrompt: "s", UserPrompt: "u"}); !errors.Is(err, ErrResponseTruncated) {
+		t.Fatalf("finish_reason length: got %v, want ErrResponseTruncated", err)
+	}
+	finish = "stop"
+	if got, err := c.SendPrompt(context.Background(), models.PromptPayload{SystemPrompt: "s", UserPrompt: "u"}); err != nil || got == "" {
+		t.Fatalf("finish_reason stop: got %q, %v", got, err)
 	}
 }
