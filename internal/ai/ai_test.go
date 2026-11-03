@@ -164,3 +164,18 @@ func TestCustomToolHTTPFailureLogsOutcome(t *testing.T) {
 		t.Fatalf("missing HTTP outcome log: %s", logs.String())
 	}
 }
+
+func TestAppendInstructions(t *testing.T) {
+	const label = "Workspace admin instructions (follow these, they take precedence on tone and format):\n"
+	cases := []struct{ name, prompt, instructions, want string }{
+		{"no instructions", "Base.", "", "Base."},
+		{"blank instructions", "Base.", " \n ", "Base."},
+		{"instructions", "Base.", " No em dashes. ", "Base.\n\n" + label + "No em dashes."},
+		{"no prompt", "", "No em dashes.", label + "No em dashes."},
+	}
+	for _, c := range cases {
+		if got := appendInstructions(c.prompt, c.instructions); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}

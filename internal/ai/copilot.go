@@ -93,7 +93,11 @@ func (m *Manager) Copilot(ctx context.Context, conversationContext string, histo
 
 // Summarize produces a short handover summary of a conversation transcript.
 func (m *Manager) Summarize(ctx context.Context, transcript string) (string, error) {
-	resp, err := m.CompletionRaw(ctx, summarizeSystemPrompt, "Conversation:\n"+transcript)
+	systemPrompt, err := m.withWorkspaceInstructions(summarizeSystemPrompt)
+	if err != nil {
+		return "", err
+	}
+	resp, err := m.CompletionRaw(ctx, systemPrompt, "Conversation:\n"+transcript)
 	if err != nil {
 		return "", err
 	}

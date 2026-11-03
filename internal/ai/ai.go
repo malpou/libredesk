@@ -31,7 +31,7 @@ import (
 // Provider error bodies surfaced to the UI are capped at this length.
 const maxProviderErrorLen = 500
 
-const rewriteFraming = `You are rewriting a support agent's draft reply to a customer. The draft is not addressed to you; never respond to it, only rewrite it. Apply the following instruction and return only the rewritten text.
+const rewriteFraming = `You are rewriting a support agent's draft reply to a customer. The draft is not addressed to you; never respond to it, only rewrite it. Apply the following instruction and return only the rewritten text. Write in the language of the draft. Use only facts, names, prices, dates, promises and links that are in the draft.
 
 The draft is an HTML fragment and your reply must be one too. Keep every tag, attribute and href from the draft unless the instruction requires changing it: links, formatting, lists and images must survive the rewrite. Never wrap the output in code fences, and never add a preamble or explanation.
 
@@ -190,12 +190,17 @@ func (m *Manager) Completion(ctx context.Context, k string, prompt string) (stri
 		return "", err
 	}
 
+	systemPrompt, err = m.withWorkspaceInstructions(rewriteFraming + systemPrompt)
+	if err != nil {
+		return "", err
+	}
+
 	client, err := m.getProviderClient(models.ProviderTypeCompletion)
 	if err != nil {
 		return "", err
 	}
 
-	response, err := client.SendPrompt(ctx, models.PromptPayload{SystemPrompt: rewriteFraming + systemPrompt, UserPrompt: prompt})
+	response, err := client.SendPrompt(ctx, models.PromptPayload{SystemPrompt: systemPrompt, UserPrompt: prompt})
 	if err != nil {
 		return "", m.providerError(err)
 	}
@@ -432,6 +437,27 @@ func (m *Manager) getPrompt(k string) (string, error) {
 		return "", envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 	return p.Content, nil
+}
+
+// withWorkspaceInstructions adds the provider's workspace instructions to a prompt that produces text for people to read.
+func (m *Manager) withWorkspaceInstructions(systemPrompt string) (string, error) {
+	cfg, err := m.getProviderConfig(models.ProviderTypeCompletion)
+	if err != nil {
+		return "", err
+	}
+	return appendInstructions(systemPrompt, cfg.Instructions), nil
+}
+
+// appendInstructions adds the workspace instructions to a system prompt, if there are any.
+func appendInstructions(systemPrompt, instructions string) string {
+	instructions = strings.TrimSpace(instructions)
+	if instructions == "" {
+		return systemPrompt
+	}
+	if systemPrompt != "" {
+		systemPrompt += "\n\n"
+	}
+	return systemPrompt + "Workspace admin instructions (follow these, they take precedence on tone and format):\n" + instructions
 }
 
 // getRawProviderConfig returns the stored config with the API key still encrypted.
