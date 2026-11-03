@@ -49,6 +49,8 @@ var (
 	ErrApiKeyNotSet        = errors.New("api Key not set")
 	ErrRateLimited         = errors.New("rate limited by AI provider")
 	ErrProviderUnavailable = errors.New("AI provider unavailable")
+	// ErrResponseTruncated means the reply hit max_tokens. It is an error so a cut-off reply never replaces an agent's draft.
+	ErrResponseTruncated = errors.New("AI reply reached the max tokens limit")
 )
 
 type Manager struct {
@@ -523,6 +525,10 @@ func (m *Manager) providerError(err error) error {
 	if errors.Is(err, ErrProviderUnavailable) {
 		m.lo.Error("AI provider unavailable", "error", err)
 		return envelope.NewError(envelope.GeneralError, m.i18n.T("ai.providerUnavailable"), nil)
+	}
+	if errors.Is(err, ErrResponseTruncated) {
+		m.lo.Error("AI reply reached the max tokens limit")
+		return envelope.NewError(envelope.GeneralError, m.i18n.T("ai.responseTruncated"), nil)
 	}
 	m.lo.Error("error from AI provider", "error", err)
 	return envelope.NewError(envelope.GeneralError, capProviderErrorMessage(err), nil)
